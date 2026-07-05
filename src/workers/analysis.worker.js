@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { eq } from "drizzle-orm";
+import { incidents } from "../db/schema.js";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { analyzeEvidence } from "../modules/analysis/analysis.service.js";
@@ -38,7 +40,9 @@ const worker = new Worker(
         });
 
         // 4. Graph updated
-        await writeToGraph(db, incidentId, aiAnalysis);
+        // 4. Graph updated
+        const [incidentRecord] = await db.select().from(incidents).where(eq(incidents.id, incidentId));
+        await writeToGraph(db, incidentId, aiAnalysis, incidentRecord?.tenantId ?? "default");
         await publishEvent(incidentId, { type: "graph-updated", reportId });
 
         // 5. Scoring

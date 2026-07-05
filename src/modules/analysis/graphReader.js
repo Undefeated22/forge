@@ -112,3 +112,73 @@ export function formatGraphContextForPrompt(graphContext) {
 
     return lines.join("\n");
 }
+// Multi-hop blast radius: weighted BFS from a node through the failure graph.
+// Unlike getGraphContext (one-hop, used for AI prompt context), this walks
+// the full cascade: what fails, then what fails because THAT failed, etc.
+export async function computeBlastRadius(db, startNodeId, tenantId, maxDepth = 4) {
+    const startNode = await db
+        .select()
+        .from(causalGraphNodes)
+        .where(and(eq(causalGraphNodes.id, startNodeId), eq(causalGraphNodes.tenantId, tenantId)));
+
+    if (startNode.length === 0) {
+        return { rootComponent: null, cascade: [], totalAffected: 0 };
+    }
+
+    const root = startNode[0];
+    const visited = new Set([root.id]);
+    const cascade = [];
+
+    // BFS, level by level, so we can report "wave 1", "wave 2", etc.
+    let frontier = [{ nodeId: root.id, pathStrength: 1.0 }];
+
+    for (let depth = 0; depth < maxDepth && frontier.length > 0; depth++) {
+        const nextFrontier = [];
+
+        for (const current of frontier) {
+            const edges = await db
+                .select()
+                .from(causalGraphEdges)
+                .where(and(eq(causalGraphEdges.fromNodeId, current.nodeId), eq(causalGraphEdges.tenantId, tenantId)));
+
+            for (const edge of edges) {
+                if (visited.has(edge.toNodeId)) continue; // no cycles
+                visited.add(edge.toNodeId);
+
+                const targetNode = await db
+                    .select()
+                    .from(causalGraphNodes)
+                    .where(eq(causalGraphNodes.id, edge.toNodeId));
+
+                if (targetNode.length === 0) continue;
+
+                // Probability decays with each hop and scales with how often
+                // this specific edge has actually fired historically.
+                // occurrenceCount is capped so one very-repeated edge doesn't
+                // claim near-100% certainty by itself.
+                const edgeStrength = Math.min(edge.occurrenceCount / 10, 1);
+                const propagatedStrength = current.pathStrength * edgeStrength * 0.85;
+
+                cascade.push({
+                    component: targetNode[0].componentName,
+                    wave: depth + 1,
+                    viaComponent: root.id === current.nodeId ? root.componentName : null,
+                    occurrenceCount: edge.occurrenceCount,
+                    estimatedProbability: Math.round(propagatedStrength * 100),
+                    failureType: edge.failureType,
+                });
+
+                nextFrontier.push({ nodeId: edge.toNodeId, pathStrength: propagatedStrength });
+            }
+        }
+        frontier = nextFrontier;
+    }
+
+    cascade.sort((a, b) => a.wave - b.wave || b.estimatedProbability - a.estimatedProbability);
+
+    return {
+        rootComponent: root.componentName,
+        totalAffected: cascade.length,
+        cascade,
+    };
+}
