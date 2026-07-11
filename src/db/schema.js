@@ -78,3 +78,24 @@ export const causalGraphEdges = pgTable("causal_graph_edges", {
     occurrenceCount: integer("occurrence_count").default(1).notNull(),
     lastSeenAt: timestamp("last_seen_at").defaultNow()
 });
+// --- FHE encrypted evidence prototype — see vault note before treating as live ---
+export const tenantFheKeys = pgTable("tenant_fhe_keys", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").default("default").notNull(),
+    // Bincode-serialized tfhe::ServerKey bytes, base64. Public by design —
+    // this lets Forge COMPUTE on ciphertexts, never decrypt them. The
+    // secret client key never touches this schema or this server.
+    serverKeyBytes: text("server_key_bytes").notNull(),
+    createdAt: timestamp("created_at").defaultNow()
+});
+
+export const encryptedEvidence = pgTable("encrypted_evidence", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    incidentId: uuid("incident_id").notNull(),
+    tenantId: text("tenant_id").default("default").notNull(),
+    inputCiphertext: text("input_ciphertext").notNull(),
+    updatedBaselineCiphertext: text("updated_baseline_ciphertext").notNull(),
+    anomalyFlagCiphertext: text("anomaly_flag_ciphertext").notNull(),
+    status: text("status").default("processing").notNull(),
+    createdAt: timestamp("created_at").defaultNow()
+});

@@ -1,0 +1,32 @@
+[package]
+name = "forge-tfhe-native"
+version = "0.1.0"
+edition = "2021"
+# tfhe 1.4.x requires rustc >= 1.84 (verified against crates.io index on 2026-07-10).
+# Build this with rustup, NOT the distro-packaged rustc.
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi4", "async"] }
+napi-derive = "2"
+
+# Real Zama TFHE library. We use the `shortint` API: real LWE ciphertexts,
+# real homomorphic addition, real Programmable Bootstrapping (PBS) via
+# lookup-table evaluation. This is NOT a stub — these are the actual
+# cryptographic primitives.
+tfhe = { version = "1.4", features = ["integer"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+opt-level = 3
+
+[features]
+insecure-test-keygen = []

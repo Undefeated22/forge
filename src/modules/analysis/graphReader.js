@@ -115,11 +115,18 @@ export function formatGraphContextForPrompt(graphContext) {
 // Multi-hop blast radius: weighted BFS from a node through the failure graph.
 // Unlike getGraphContext (one-hop, used for AI prompt context), this walks
 // the full cascade: what fails, then what fails because THAT failed, etc.
+async function findNodesByCriteria(db, tenantId, predicate = () => true) {
+    const rows = await db.select().from(causalGraphNodes).where(eq(causalGraphNodes.tenantId, tenantId));
+    return rows.filter((row) => predicate(row));
+}
+
+async function findEdgesByCriteria(db, tenantId, predicate = () => true) {
+    const rows = await db.select().from(causalGraphEdges).where(eq(causalGraphEdges.tenantId, tenantId));
+    return rows.filter((row) => predicate(row));
+}
+
 export async function computeBlastRadius(db, startNodeId, tenantId, maxDepth = 4) {
-    const startNode = await db
-        .select()
-        .from(causalGraphNodes)
-        .where(and(eq(causalGraphNodes.id, startNodeId), eq(causalGraphNodes.tenantId, tenantId)));
+    const startNode = await findNodesByCriteria(db, tenantId, (node) => node.id === startNodeId);
 
     if (startNode.length === 0) {
         return { rootComponent: null, cascade: [], totalAffected: 0 };
@@ -136,19 +143,13 @@ export async function computeBlastRadius(db, startNodeId, tenantId, maxDepth = 4
         const nextFrontier = [];
 
         for (const current of frontier) {
-            const edges = await db
-                .select()
-                .from(causalGraphEdges)
-                .where(and(eq(causalGraphEdges.fromNodeId, current.nodeId), eq(causalGraphEdges.tenantId, tenantId)));
+            const edges = await findEdgesByCriteria(db, tenantId, (edge) => edge.fromNodeId === current.nodeId);
 
             for (const edge of edges) {
                 if (visited.has(edge.toNodeId)) continue; // no cycles
                 visited.add(edge.toNodeId);
 
-                const targetNode = await db
-                    .select()
-                    .from(causalGraphNodes)
-                    .where(eq(causalGraphNodes.id, edge.toNodeId));
+                const targetNode = await findNodesByCriteria(db, tenantId, (node) => node.id === edge.toNodeId);
 
                 if (targetNode.length === 0) continue;
 

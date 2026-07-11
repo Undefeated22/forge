@@ -14,6 +14,9 @@ async function start() {
         // instead of as a separate service. Importing the module starts the Worker.
         await import("./workers/analysis.worker.js");
         console.log("[Worker] Analysis worker started in-process");
+
+        await import("./workers/fheEvidence.worker.js");
+        console.log("[Worker] FHE evidence worker started in-process");
     } catch (err) {
         app.log.error(err);
         process.exit(1);

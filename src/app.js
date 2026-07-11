@@ -10,6 +10,8 @@ import incidentRoutes from "./modules/incidents/incident.routes.js";
 import analysisRoutes from "./modules/analysis/analysis.routes.js";
 import reportRoutes from "./modules/reports/report.routes.js";
 import { graphRoutes } from "./modules/graph/graph.routes.js";
+
+import encryptedEvidenceRoutes from "./modules/encryptedEvidence/encryptedEvidence.routes.js";
 import realtimeRoutes from "./modules/realtime/realtime.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import { runbookRoutes } from "./modules/runbooks/runbook.routes.js";
@@ -48,7 +50,7 @@ export function buildApp() {
             return reply.status(401).send({ error: "Unauthorized" });
         }
     });
-
+    app.register(encryptedEvidenceRoutes, { prefix: "/incidents" });
     app.register(healthRoute);
     app.register(authRoutes, { prefix: "/auth" });
     app.register(incidentRoutes, { prefix: "/incidents" });
