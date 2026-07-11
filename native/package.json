@@ -1,0 +1,21 @@
+{
+  "name": "forge-tfhe-native",
+  "version": "0.1.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "forge-tfhe-native",
+    "targets": ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "build:test-features": "napi build --platform --release --features insecure-test-keygen"
+  },
+  "engines": {
+    "node": ">= 18"
+  }
+}
