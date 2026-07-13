@@ -50,7 +50,8 @@ export async function dispatchToSlack(incidentId, aiPayload, escalation) {
         const res = await fetch(webhookUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(message)
+            body: JSON.stringify(message),
+            signal: AbortSignal.timeout(10_000)
         });
 
         if (!res.ok) {
