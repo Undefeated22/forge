@@ -23,8 +23,12 @@ import rateLimit from "@fastify/rate-limit";
 export function buildApp() {
     const app = Fastify({ logger: true, trustProxy: true });
 
+    const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:3000")
+        .split(",")
+        .map((origin) => origin.trim());
+
     app.register(cors, {
-        origin: process.env.FRONTEND_URL || "http://localhost:3000",
+        origin: allowedOrigins,
         credentials: true
     });
 
