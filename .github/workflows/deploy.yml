@@ -45,10 +45,13 @@ jobs:
       # Configure the HEALTH_CHECK_URL repo/environment secret to enable this
       # (e.g. https://forge-production.up.railway.app/health).
       - name: Wait for deployment to become healthy
-        if: ${{ secrets.HEALTH_CHECK_URL != '' }}
         env:
           HEALTH_CHECK_URL: ${{ secrets.HEALTH_CHECK_URL }}
         run: |
+          if [ -z "$HEALTH_CHECK_URL" ]; then
+            echo "HEALTH_CHECK_URL not configured, skipping health check."
+            exit 0
+          fi
           echo "Polling $HEALTH_CHECK_URL for a healthy response..."
           for i in $(seq 1 20); do
             status=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_CHECK_URL" || echo "000")
