@@ -1,4 +1,4 @@
-import { createIncidentHandler, uploadIncidentFileHandler, listIncidentsHandler } from "./incident.controller.js";
+import { createIncidentHandler, listIncidentsHandler } from "./incident.controller.js";
 import { uploadEvidenceHandler } from "./evidence.controller.js";
 
 export default async function incidentRoutes(fastify) {

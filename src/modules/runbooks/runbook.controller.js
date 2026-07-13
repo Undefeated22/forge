@@ -1,5 +1,6 @@
-import { eq, desc } from "drizzle-orm";
-import { reports, incidents } from "../../db/schema.js";
+import { eq } from "drizzle-orm";
+import { incidents } from "../../db/schema.js";
+import { getReportsForIncidentIds } from "../reports/reports.repository.js";
 
 export async function getRunbooksHandler(req, reply) {
     try {
@@ -16,20 +17,16 @@ export async function getRunbooksHandler(req, reply) {
         }
 
         const incidentById = Object.fromEntries(orgIncidents.map(i => [i.id, i]));
-        const incidentIds = new Set(orgIncidents.map(i => i.id));
+        const incidentIds = orgIncidents.map(i => i.id);
 
-        // 2. get all reports, keep only ones for this org's incidents
-        const allReports = await req.server.db
-            .select()
-            .from(reports)
-            .orderBy(desc(reports.createdAt));
+        // 2. get reports for THIS org's incidents only
+        const allReports = await getReportsForIncidentIds(req.server.db, incidentIds);
 
         // 3. flatten every scoredRunbook step, tagging it with its incident
         const steps = [];
         const seenIncidents = new Set();
 
         for (const report of allReports) {
-            if (!incidentIds.has(report.incidentId)) continue;          // tenant guard
             const scored = report.scoredRunbook?.scoredSteps;
             if (!scored || !Array.isArray(scored)) continue;
 
