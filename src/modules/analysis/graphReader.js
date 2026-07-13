@@ -115,24 +115,28 @@ export function formatGraphContextForPrompt(graphContext) {
 // Multi-hop blast radius: weighted BFS from a node through the failure graph.
 // Unlike getGraphContext (one-hop, used for AI prompt context), this walks
 // the full cascade: what fails, then what fails because THAT failed, etc.
-async function findNodesByCriteria(db, tenantId, predicate = () => true) {
-    const rows = await db.select().from(causalGraphNodes).where(eq(causalGraphNodes.tenantId, tenantId));
-    return rows.filter((row) => predicate(row));
-}
-
-async function findEdgesByCriteria(db, tenantId, predicate = () => true) {
-    const rows = await db.select().from(causalGraphEdges).where(eq(causalGraphEdges.tenantId, tenantId));
-    return rows.filter((row) => predicate(row));
-}
-
+//
+// Fetches the tenant's nodes/edges ONCE and traverses entirely in memory,
+// instead of issuing a fresh DB query per node/edge visited during the BFS.
 export async function computeBlastRadius(db, startNodeId, tenantId, maxDepth = 4) {
-    const startNode = await findNodesByCriteria(db, tenantId, (node) => node.id === startNodeId);
+    const [allNodes, allEdges] = await Promise.all([
+        db.select().from(causalGraphNodes).where(eq(causalGraphNodes.tenantId, tenantId)),
+        db.select().from(causalGraphEdges).where(eq(causalGraphEdges.tenantId, tenantId)),
+    ]);
 
-    if (startNode.length === 0) {
+    const nodeById = new Map(allNodes.map((n) => [n.id, n]));
+    const edgesByFromNodeId = new Map();
+    for (const edge of allEdges) {
+        const bucket = edgesByFromNodeId.get(edge.fromNodeId);
+        if (bucket) bucket.push(edge);
+        else edgesByFromNodeId.set(edge.fromNodeId, [edge]);
+    }
+
+    const root = nodeById.get(startNodeId);
+    if (!root) {
         return { rootComponent: null, cascade: [], totalAffected: 0 };
     }
 
-    const root = startNode[0];
     const visited = new Set([root.id]);
     const cascade = [];
 
@@ -143,15 +147,14 @@ export async function computeBlastRadius(db, startNodeId, tenantId, maxDepth = 4
         const nextFrontier = [];
 
         for (const current of frontier) {
-            const edges = await findEdgesByCriteria(db, tenantId, (edge) => edge.fromNodeId === current.nodeId);
+            const edges = edgesByFromNodeId.get(current.nodeId) ?? [];
 
             for (const edge of edges) {
                 if (visited.has(edge.toNodeId)) continue; // no cycles
                 visited.add(edge.toNodeId);
 
-                const targetNode = await findNodesByCriteria(db, tenantId, (node) => node.id === edge.toNodeId);
-
-                if (targetNode.length === 0) continue;
+                const targetNode = nodeById.get(edge.toNodeId);
+                if (!targetNode) continue;
 
                 // Probability decays with each hop and scales with how often
                 // this specific edge has actually fired historically.
@@ -161,7 +164,7 @@ export async function computeBlastRadius(db, startNodeId, tenantId, maxDepth = 4
                 const propagatedStrength = current.pathStrength * edgeStrength * 0.85;
 
                 cascade.push({
-                    component: targetNode[0].componentName,
+                    component: targetNode.componentName,
                     wave: depth + 1,
                     viaComponent: root.id === current.nodeId ? root.componentName : null,
                     occurrenceCount: edge.occurrenceCount,
