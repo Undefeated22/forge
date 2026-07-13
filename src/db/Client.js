@@ -3,6 +3,9 @@ import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import dns from "dns/promises";
 
+if (!process.env.DATABASE_URL) {
+    throw new Error("Missing required environment variable: DATABASE_URL");
+}
 const url = new URL(process.env.DATABASE_URL);
 
 // pg doesn't honour family:4 — resolve to IPv4 manually so we never hit IPv6

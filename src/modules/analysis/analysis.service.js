@@ -4,6 +4,9 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { fuseLogs } from "./logFusion.js";
 import { getBestGraphContext, formatGraphContextForPrompt } from "./graphReader.js";
 
+if (!process.env.GEMINI_API_KEY) {
+    throw new Error("Missing required environment variable: GEMINI_API_KEY");
+}
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 export async function analyzeEvidence(db, incidentId, tenantId = "default") {
 
@@ -102,10 +105,13 @@ ${fused}
 
  const responseText = await callWithRetry(model, prompt);
 return JSON.parse(responseText);}
+
+const GEMINI_TIMEOUT_MS = 60_000;
+
 async function callWithRetry(model, prompt, maxRetries = 4) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const result = await model.generateContent(prompt);
+            const result = await model.generateContent(prompt, { timeout: GEMINI_TIMEOUT_MS });
             return result.response.text();
         } catch (error) {
             const msg = error.message ?? "";
@@ -115,6 +121,7 @@ async function callWithRetry(model, prompt, maxRetries = 4) {
                 msg.includes("fetch failed") ||
                 msg.includes("ECONNRESET") ||
                 msg.includes("ETIMEDOUT") ||
+                msg.includes("aborted") ||
                 msg.includes("network");
 
             if (!isRetryable || attempt === maxRetries) throw error;

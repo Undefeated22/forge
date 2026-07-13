@@ -37,3 +37,31 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: railway up --detach --service forge --environment production
+
+      # `railway up --detach` only confirms the upload succeeded, not that the
+      # new instance is actually serving traffic (e.g. a missing env var or
+      # unapplied migration can boot into a crash loop while this job stays
+      # green). Poll /health so a bad deploy fails the workflow.
+      # Configure the HEALTH_CHECK_URL repo/environment secret to enable this
+      # (e.g. https://forge-production.up.railway.app/health).
+      - name: Wait for deployment to become healthy
+        env:
+          HEALTH_CHECK_URL: ${{ secrets.HEALTH_CHECK_URL }}
+        run: |
+          if [ -z "$HEALTH_CHECK_URL" ]; then
+            echo "HEALTH_CHECK_URL not configured, skipping health check."
+            exit 0
+          fi
+          echo "Polling $HEALTH_CHECK_URL for a healthy response..."
+          for i in $(seq 1 20); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_CHECK_URL" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Deployment healthy after $i attempt(s)."
+              exit 0
+            fi
+            echo "Attempt $i: got HTTP $status, retrying in 10s..."
+            sleep 10
+          done
+          echo "Deployment did not become healthy within the timeout."
+          echo "Manual rollback required: railway redeploy <previous-deployment-id> --service forge --environment production"
+          exit 1

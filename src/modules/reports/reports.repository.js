@@ -1,5 +1,14 @@
-import { eq } from "drizzle-orm";
+import { eq, desc, inArray } from "drizzle-orm";
 import { reports } from "../../db/schema.js";
+
+export async function getReportsForIncidentIds(db, incidentIds) {
+    if (!incidentIds.length) return [];
+    return db
+        .select()
+        .from(reports)
+        .where(inArray(reports.incidentId, incidentIds))
+        .orderBy(desc(reports.createdAt));
+}
 
 export async function saveReport(db, data) {
     const result = await db.insert(reports).values({

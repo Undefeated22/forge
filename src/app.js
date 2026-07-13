@@ -27,6 +27,15 @@ export function buildApp() {
         origin: process.env.FRONTEND_URL || "http://localhost:3000",
         credentials: true
     });
+
+    // ---- helmet + rate-limit MUST register before any route plugin: Fastify
+    // only applies a plugin's hooks to routes registered after it. ----
+    app.register(helmet);
+    app.register(rateLimit, {
+        max: 100,                 // 100 requests
+        timeWindow: "1 minute",   // per IP per minute, globally
+    });
+
     app.register(multipart);
 
     // ---- auth infrastructure (must register before routes) ----
@@ -59,12 +68,6 @@ export function buildApp() {
     app.register(graphRoutes);
     app.register(realtimeRoutes);
     app.register(runbookRoutes);
-    app.register(helmet);
-
-    app.register(rateLimit, {
-        max: 100,                 // 100 requests
-        timeWindow: "1 minute",   // per IP per minute, globally
-    });
 
     app.register(swagger, {
         openapi: {

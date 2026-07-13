@@ -13,7 +13,7 @@ import { dispatchToSlack } from "../modules/notifications/slackDispatcher.js";
 import { publishEvent } from "../events/publisher.js";
 
 const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
-const worker = new Worker(
+export const worker = new Worker(
     "analysis-queue",
     async (job) => {
         const { incidentId, reportId } = job.data;
@@ -23,8 +23,11 @@ const worker = new Worker(
         await updateReportStatus(db, reportId, "processing");
         await publishEvent(incidentId, { type: "status", status: "processing", reportId });
 
+        const [incidentRecord] = await db.select().from(incidents).where(eq(incidents.id, incidentId));
+        const tenantId = incidentRecord?.tenantId ?? "default";
+
         // 2. Run AI analysis
-        const aiAnalysis = await analyzeEvidence(db, incidentId);
+        const aiAnalysis = await analyzeEvidence(db, incidentId, tenantId);
         if (!aiAnalysis) {
             throw new Error(`No evidence found for incident ${incidentId}`);
         }
@@ -40,9 +43,7 @@ const worker = new Worker(
         });
 
         // 4. Graph updated
-        // 4. Graph updated
-        const [incidentRecord] = await db.select().from(incidents).where(eq(incidents.id, incidentId));
-        await writeToGraph(db, incidentId, aiAnalysis, incidentRecord?.tenantId ?? "default");
+        await writeToGraph(db, incidentId, aiAnalysis, tenantId);
         await publishEvent(incidentId, { type: "graph-updated", reportId });
 
         // 5. Scoring

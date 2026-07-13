@@ -1,11 +1,7 @@
-import { incidents, reports } from "../../db/schema.js";
-import fs from "fs/promises";
-import path from "path";
-import { extractEvidence } from "../evidence/evidence.service.js";
-import { saveEvidence } from "../evidence/evidence.repository.js";
-import { createIncident, saveIncidentFile } from "./incident.service.js";
-import { analysisQueue } from "../../queues/analysis.queue.js";
-import { desc, eq, and } from "drizzle-orm";
+import { incidents } from "../../db/schema.js";
+import { createIncident } from "./incident.service.js";
+import { getReportsForIncidentIds } from "../reports/reports.repository.js";
+import { desc, eq } from "drizzle-orm";
 
 
 export async function createIncidentHandler(req, reply) {
@@ -14,19 +10,6 @@ export async function createIncidentHandler(req, reply) {
     const tenantId = req.user.organizationId;         // their org
     const incident = await createIncident(req.server.db, { title, description, userId, tenantId });
     return { success: true, data: incident };
-}
-
-export async function uploadIncidentFileHandler(req, reply) {
-    const { incidentId } = req.params;
-    const data = await req.file();
-    const fileName = `${Date.now()}-${data.filename}`;
-    const filePath = path.join("uploads", fileName);
-    await fs.writeFile(filePath, await data.toBuffer());
-    const record = await saveIncidentFile(req.server.db, { incidentId, fileType: data.mimetype, filePath });
-    const evidenceData = await extractEvidence(filePath);
-    await saveEvidence(req.server.db, incidentId, evidenceData);
-    await analysisQueue.add("analyze-incident", { incidentId });
-    return { success: true, file: record, evidence: evidenceData };
 }
 
 export async function listIncidentsHandler(req, reply) {
@@ -40,12 +23,11 @@ export async function listIncidentsHandler(req, reply) {
             .orderBy(desc(incidents.createdAt));
 
         // fetch reports for THIS org's incidents only
-        const incidentIds = new Set(allIncidents.map(i => i.id));
-        const allReports = await req.server.db.select().from(reports);
+        const incidentIds = allIncidents.map(i => i.id);
+        const allReports = await getReportsForIncidentIds(req.server.db, incidentIds);
 
         const reportByIncident = {};
         for (const r of allReports) {
-            if (!incidentIds.has(r.incidentId)) continue;   // ignore other orgs' reports
             const existing = reportByIncident[r.incidentId];
             if (!existing || new Date(r.createdAt) > new Date(existing.createdAt)) {
                 reportByIncident[r.incidentId] = r;
