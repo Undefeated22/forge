@@ -1,10 +1,24 @@
-import { evidence } from "../../db/schema.js";
+import { eq } from "drizzle-orm";
+import { evidence, incidents } from "../../db/schema.js";
 import { analysisQueue } from "../../queues/analysis.queue.js";
 import { createPendingReport } from "../reports/reports.repository.js";
 
 export async function uploadEvidenceHandler(req, reply) {
     try {
         const { incidentId } = req.params;
+        const tenantId = req.user.organizationId;
+
+        // verify the incident belongs to the caller's org
+        const incidentRows = await req.server.db
+            .select()
+            .from(incidents)
+            .where(eq(incidents.id, incidentId))
+            .limit(1);
+
+        const incident = incidentRows[0];
+        if (!incident || incident.tenantId !== tenantId) {
+            return reply.status(404).send({ error: "Incident not found" });
+        }
 
         const files = req.files();
         const insertedEvidence = [];

@@ -1,24 +1,39 @@
 
-import { Queue } from "bullmq";
-import IORedis from "ioredis";
-
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
-const analysisQueue = new Queue("analysis-queue", { connection });
+import { eq } from "drizzle-orm";
+import { incidents } from "../../db/schema.js";
+import { createPendingReport } from "../reports/reports.repository.js";
+import { analysisQueue } from "../../queues/analysis.queue.js";
 
 export async function analyzeIncidentHandler(req, reply) {
     try {
         const { incidentId } = req.params;
+        const tenantId = req.user.organizationId;
 
+        // verify the incident belongs to the caller's org
+        const incidentRows = await req.server.db
+            .select()
+            .from(incidents)
+            .where(eq(incidents.id, incidentId))
+            .limit(1);
+
+        const incident = incidentRows[0];
+        // same 404 whether it doesn't exist OR belongs to another org
+        if (!incident || incident.tenantId !== tenantId) {
+            return reply.status(404).send({ error: "Incident not found" });
+        }
+
+        const report = await createPendingReport(req.server.db, incidentId);
 
         const job = await analysisQueue.add("analyze-incident", {
-            incidentId
+            incidentId,
+            reportId: report.id
         });
-
 
         return reply.status(202).send({
             success: true,
             message: "Analysis job queued successfully. The AI is processing it in the background.",
-            jobId: job.id
+            jobId: job.id,
+            reportId: report.id
         });
 
     } catch (error) {

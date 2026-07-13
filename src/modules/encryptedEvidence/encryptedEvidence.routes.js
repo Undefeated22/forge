@@ -1,3 +1,5 @@
+import { eq } from "drizzle-orm";
+import { incidents } from "../../db/schema.js";
 import { fheEvidenceQueue } from "../../queues/fheEvidence.queue.js";
 
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
@@ -18,6 +20,18 @@ export default async function encryptedEvidenceRoutes(app) {
         const tenantId = req.user?.organizationId;
         if (!tenantId) {
             return reply.status(401).send({ error: "Unauthenticated" });
+        }
+
+        // verify the incident belongs to the caller's org
+        const incidentRows = await req.server.db
+            .select()
+            .from(incidents)
+            .where(eq(incidents.id, incidentId))
+            .limit(1);
+
+        const incident = incidentRows[0];
+        if (!incident || incident.tenantId !== tenantId) {
+            return reply.status(404).send({ error: "Incident not found" });
         }
 
         if (!Buffer.isBuffer(buf) || !buf.length) {

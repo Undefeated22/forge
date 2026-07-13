@@ -54,7 +54,7 @@ export async function logoutHandler(req, reply) {
     reply.clearCookie(COOKIE_NAME, { path: "/" });
     return reply.send({ success: true });
 }
-const FRONTEND_URL = "http://localhost:3000";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 export async function forgotPasswordHandler(req, reply) {
     const { email } = req.body ?? {};
