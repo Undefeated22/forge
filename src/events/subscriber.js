@@ -1,11 +1,11 @@
-import IORedis from "ioredis";
+import { createRedisConnection } from "../config/redis.js";
 
 // Map of incidentId → Set of connected WebSocket sockets watching it.
 // This is our "rooms" structure — each incident is a room.
 const rooms = new Map();
 
 // Dedicated subscriber connection (pub/sub mode can't share).
-const subscriber = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
+const subscriber = createRedisConnection();
 // Subscribe to ALL incident channels using a pattern.
 // psubscribe matches `incident:*` — every incident's channel at once.
 subscriber.psubscribe("incident:*", (err) => {

@@ -33,14 +33,6 @@ export const incidents = pgTable("incidents", {
     createdAt: timestamp("created_at").defaultNow()
 });
 
-export const incidentFiles = pgTable("incident_files", {
-    id: uuid("id").defaultRandom().primaryKey(),
-    incidentId: uuid("incident_id").notNull(),
-    fileType: text("file_type").notNull(),
-    filePath: text("file_path").notNull(),
-    uploadedAt: timestamp("uploaded_at").defaultNow()
-});
-
 export const evidence = pgTable("evidence", {
     id: uuid("id").defaultRandom().primaryKey(),
     incidentId: uuid("incident_id").notNull(),

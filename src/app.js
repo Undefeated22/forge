@@ -40,7 +40,12 @@ export function buildApp() {
         timeWindow: "1 minute",   // per IP per minute, globally
     });
 
-    app.register(multipart);
+    app.register(multipart, {
+        // Evidence files are buffered whole into memory and stored inline in
+        // Postgres — cap them so one upload can't OOM the process or blow the
+        // LLM context downstream.
+        limits: { fileSize: 5 * 1024 * 1024, files: 10 }
+    });
 
     // ---- auth infrastructure (must register before routes) ----
     app.register(cookie);

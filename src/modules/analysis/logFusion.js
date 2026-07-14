@@ -8,10 +8,14 @@ export function fuseLogs(evidenceRecords){
             const trimmed = line.trim();
             if (!trimmed) continue;
            const timestamp = extractTimestamp(trimmed);
+            // Formats we extract but Date can't parse (e.g. Apache's
+            // 12/Jul/2026:10:00:00) yield NaN, which would make the sort
+            // nondeterministic — treat them like missing timestamps instead.
+            const parsed = timestamp ? new Date(timestamp).getTime() : NaN;
             allLines.push({source: sourceName,
                 timestamp,
                 raw: trimmed,
-                sortkey: timestamp ? new Date(timestamp).getTime() : Infinity
+                sortkey: Number.isNaN(parsed) ? Infinity : parsed
             });
 
         }

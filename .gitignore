@@ -3,7 +3,8 @@ node_modules
 uploads*.txt
 cookies.txt
 
-# curl cookie jars
+# curl cookie jars — these hold live session tokens; never commit them
+demo*.txt
 c.txt
 cookies.txt
 test.txt
