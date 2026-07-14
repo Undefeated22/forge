@@ -2,7 +2,7 @@ import "dotenv/config";
 import { eq } from "drizzle-orm";
 import { incidents } from "../db/schema.js";
 import { Worker } from "bullmq";
-import IORedis from "ioredis";
+import { createRedisConnection } from "../config/redis.js";
 import { analyzeEvidence } from "../modules/analysis/analysis.service.js";
 import { updateReportStatus, saveScoredRunbook, saveEscalationTier } from "../modules/reports/reports.repository.js";
 import { db } from "../db/Client.js";
@@ -12,7 +12,7 @@ import { decideEscalation } from "../modules/analysis/escalationRouter.js";
 import { dispatchToSlack } from "../modules/notifications/slackDispatcher.js";
 import { publishEvent } from "../events/publisher.js";
 
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
+const connection = createRedisConnection();
 export const worker = new Worker(
     "analysis-queue",
     async (job) => {
@@ -85,14 +85,9 @@ export const worker = new Worker(
 
         console.log(`[Worker] Completed — report: ${reportId}`);
     },
-    {
-        connection,
-        attempts: 3,
-        backoff: {
-            type: "exponential",
-            delay: 3000
-        }
-    }
+    // Retry policy lives on the Queue's defaultJobOptions — attempts/backoff
+    // are job options and are ignored if passed to the Worker constructor.
+    { connection }
 );
 
 worker.on("failed", async (job, err) => {

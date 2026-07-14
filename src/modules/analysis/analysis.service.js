@@ -17,7 +17,15 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default") {
 
     if (!records.length) return null;
 
-    const { fused, lineCount, sourceCount } = fuseLogs(records);
+    const { fused: fusedFull, lineCount, sourceCount } = fuseLogs(records);
+
+    // Cap what we ship to the model: huge log dumps blow the context window
+    // (hard failure) and the token bill (soft one). Keep the head — incidents
+    // are fused chronologically, so the earliest lines carry the trigger.
+    const MAX_FUSED_CHARS = 150_000;
+    const fused = fusedFull.length > MAX_FUSED_CHARS
+        ? `${fusedFull.slice(0, MAX_FUSED_CHARS)}\n[... telemetry truncated at ${MAX_FUSED_CHARS} chars — ${lineCount} total lines fused ...]`
+        : fusedFull;
 
 const graphContext = await getBestGraphContext(db, fused, tenantId);
 const historicalMemory = formatGraphContextForPrompt(graphContext);
