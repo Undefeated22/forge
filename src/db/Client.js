@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import dns from "dns/promises";
+import tls from "tls";
 
 if (!process.env.DATABASE_URL) {
     throw new Error("Missing required environment variable: DATABASE_URL");
@@ -18,8 +19,11 @@ export const pool = new Pool({
     password: url.password,
     database: url.pathname.slice(1),
     ssl: {
-        rejectUnauthorized: false,
-        servername: url.hostname  // SNI so Neon can identify the endpoint
+        rejectUnauthorized: true,
+        servername: url.hostname,  // SNI so Neon can identify the endpoint
+        // We dial an IP, so Node would otherwise verify the cert against the
+        // IP and fail — verify against the original hostname instead.
+        checkServerIdentity: (_host, cert) => tls.checkServerIdentity(url.hostname, cert)
     }
 });
 

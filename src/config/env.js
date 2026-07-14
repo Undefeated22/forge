@@ -4,8 +4,16 @@ dotenv.config();
 
 const REQUIRED_ENV_VARS = ["DATABASE_URL", "JWT_SECRET", "GEMINI_API_KEY"];
 
+// In production a missing REDIS_URL must fail the boot, not silently fall
+// back to localhost:6379 (which doesn't exist on the hosting container —
+// every enqueue would 503 while the app looks "up").
+const REQUIRED_IN_PRODUCTION = ["REDIS_URL"];
+
 export function validateEnv() {
-  const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
+  const required = process.env.NODE_ENV === "production"
+    ? [...REQUIRED_ENV_VARS, ...REQUIRED_IN_PRODUCTION]
+    : REQUIRED_ENV_VARS;
+  const missing = required.filter((key) => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(
       `Missing required environment variable(s): ${missing.join(", ")}. ` +

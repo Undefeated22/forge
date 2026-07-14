@@ -1,6 +1,11 @@
 import { Queue } from "bullmq";
-import IORedis from "ioredis";
+import { createRedisConnection } from "../config/redis.js";
 
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
-
-export const fheEvidenceQueue = new Queue("fhe-evidence-queue", { connection });
+export const fheEvidenceQueue = new Queue("fhe-evidence-queue", {
+    connection: createRedisConnection(),
+    defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 1000 },
+        removeOnComplete: true,
+    },
+});

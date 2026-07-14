@@ -1,5 +1,5 @@
 import {
-    hashPassword, verifyPassword, findUserByEmail, createUser, createOrganization,
+    hashPassword, verifyPassword, findUserByEmail, createUserWithOrganization,
     generateResetToken, createResetToken, findValidResetToken, markTokenUsed, updateUserPassword
 } from "./auth.service.js";
 const COOKIE_NAME = "forge_token";
@@ -11,6 +11,9 @@ const cookieOpts = {
     path: "/",
     maxAge: 60 * 60 * 24 * 7,
 };
+// The JWT itself must expire too — cookie maxAge only limits the browser,
+// not a captured token.
+const JWT_OPTS = { expiresIn: "7d" };
 export async function signupHandler(req, reply) {
     const { email, password } = req.body ?? {};
     if (!email || !password) return reply.status(400).send({ error: "Email and password required" });
@@ -21,12 +24,20 @@ export async function signupHandler(req, reply) {
 
     // create the user's organization (they become its owner)
     const orgName = `${email.split("@")[0]}'s Workspace`;
-    const org = await createOrganization(req.server.db, orgName);
-
     const passwordHash = await hashPassword(password);
-    const user = await createUser(req.server.db, email, passwordHash, org.id);
 
-    const token = req.server.jwt.sign({ id: user.id, email: user.email, organizationId: org.id });
+    let user, org;
+    try {
+        ({ user, org } = await createUserWithOrganization(req.server.db, email, passwordHash, orgName));
+    } catch (err) {
+        // unique-violation race: two signups passed the existence check together
+        if (err.code === "23505") {
+            return reply.status(409).send({ error: "An account with that email already exists" });
+        }
+        throw err;
+    }
+
+    const token = req.server.jwt.sign({ id: user.id, email: user.email, organizationId: org.id }, JWT_OPTS);
     reply.setCookie(COOKIE_NAME, token, cookieOpts);
     return reply.status(201).send({ success: true, user: { id: user.id, email: user.email, organizationId: org.id } });
 }
@@ -41,7 +52,7 @@ export async function loginHandler(req, reply) {
     const ok = await verifyPassword(password, user.passwordHash);
     if (!ok) return reply.status(401).send({ error: "Invalid email or password" });
 
-    const token = req.server.jwt.sign({ id: user.id, email: user.email, organizationId: user.organizationId });
+    const token = req.server.jwt.sign({ id: user.id, email: user.email, organizationId: user.organizationId }, JWT_OPTS);
     reply.setCookie(COOKIE_NAME, token, cookieOpts);
     return reply.send({ success: true, user: { id: user.id, email: user.email, organizationId: user.organizationId } });
 }
@@ -70,9 +81,13 @@ export async function forgotPasswordHandler(req, reply) {
         await createResetToken(req.server.db, user.id, token, expiresAt);
 
         const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
-        // DEV: log the link. (Swap for real email via Resend later.)
-        req.log.info(`[PASSWORD RESET] Link for ${user.email}: ${resetLink}`);
-        console.log(`\n🔑 PASSWORD RESET LINK for ${user.email}:\n${resetLink}\n`);
+        // TODO: send via a real email provider. Until then the link is only
+        // surfaced in non-production logs — reset links in prod log drains
+        // are an account-takeover vector.
+        if (!isProd) {
+            req.log.info(`[PASSWORD RESET] Link for ${user.email}: ${resetLink}`);
+            console.log(`\n🔑 PASSWORD RESET LINK for ${user.email}:\n${resetLink}\n`);
+        }
     }
 
     return reply.send({ success: true, message: "If an account exists for that email, a reset link has been sent." });

@@ -1,6 +1,12 @@
 import { Queue } from "bullmq";
-import IORedis from "ioredis";
+import { createRedisConnection } from "../config/redis.js";
 
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
-
-export const analysisQueue = new Queue("analysis-queue", { connection });
+// attempts/backoff are JOB options — they must live here (or on each .add()),
+// not on the Worker constructor where BullMQ silently ignores them.
+export const analysisQueue = new Queue("analysis-queue", {
+    connection: createRedisConnection(),
+    defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 3000 },
+    },
+});
