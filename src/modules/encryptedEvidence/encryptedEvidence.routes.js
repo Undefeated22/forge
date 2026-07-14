@@ -1,4 +1,5 @@
 
+import crypto from "crypto";
 import { eq } from "drizzle-orm";
 import { incidents } from "../../db/schema.js";
 import { fheEvidenceQueue } from "../../queues/fheEvidence.queue.js";
@@ -43,10 +44,16 @@ export default async function encryptedEvidenceRoutes(app) {
         }
 
         try {
+            // Deterministic job id: re-submitting the identical payload for the
+            // same incident dedupes in the queue instead of double-counting
+            // into the homomorphic baseline. attempts/backoff/removeOnComplete
+            // come from the queue's defaultJobOptions.
+            const jobId = crypto.createHash("sha256")
+                .update(incidentId).update(buf).digest("hex");
             const job = await fheEvidenceQueue.add(
                 "process-encrypted-evidence",
                 { incidentId, tenantId, ciphertext: buf.toString("base64") },
-                { removeOnComplete: true, attempts: 3, backoff: { type: "exponential", delay: 1000 } }
+                { jobId }
             );
             return reply.status(202).send({ status: "QUEUED", jobId: job.id });
         } catch (err) {

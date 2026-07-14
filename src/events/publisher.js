@@ -1,8 +1,8 @@
-import IORedis from "ioredis";
+import { createRedisConnection } from "../config/redis.js";
 
 // A dedicated Redis connection JUST for publishing.
 // Pub/sub connections shouldn't share with the queue connection.
-export const publisher = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
+export const publisher = createRedisConnection();
 // Publish an event for a specific incident.
 // channelName is always `incident:<incidentId>` so subscribers can target it.
 export async function publishEvent(incidentId, event) {
