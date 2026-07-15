@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, integer, boolean, unique } from "drizzle-orm/pg-core";
 
 export const organizations = pgTable("organizations", {
     id: uuid("id").defaultRandom().primaryKey(),
@@ -9,11 +9,65 @@ export const organizations = pgTable("organizations", {
 export const users = pgTable("users", {
     id: uuid("id").defaultRandom().primaryKey(),
     email: text("email").notNull().unique(),
-    passwordHash: text("password_hash").notNull(),
+    // nullable: OAuth-only accounts have no password
+    passwordHash: text("password_hash"),
     organizationId: uuid("organization_id"),  // which org they belong to
-    role: text("role").default("member"),     // "owner" | "member"
+    role: text("role").default("member"),     // "owner" | "admin" | "member" | "viewer"
+    emailVerified: boolean("email_verified").default(false).notNull(),
+    status: text("status").default("active").notNull(), // "active" | "suspended"
+    // bumped on password change / role change / suspension — invalidates every
+    // outstanding access JWT and refresh token for the user at once
+    tokenVersion: integer("token_version").default(0).notNull(),
+    failedLoginAttempts: integer("failed_login_attempts").default(0).notNull(),
+    lockedUntil: timestamp("locked_until"),
+    lastLoginAt: timestamp("last_login_at"),
     createAt: timestamp("created_at").defaultNow()
 });
+
+export const emailVerificationTokens = pgTable("email_verification_tokens", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull(),
+    token: text("token").notNull().unique(), // sha256 of the raw token
+    expiresAt: timestamp("expires_at").notNull(),
+    used: boolean("used").default(false).notNull(),
+    createdAt: timestamp("created_at").defaultNow()
+});
+
+export const refreshTokens = pgTable("refresh_tokens", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull(),
+    token: text("token").notNull().unique(), // sha256 of the raw token
+    expiresAt: timestamp("expires_at").notNull(),
+    revokedAt: timestamp("revoked_at"),
+    // rotation chain: presenting an already-rotated token means theft —
+    // the whole family gets revoked
+    replacedById: uuid("replaced_by_id"),
+    userAgent: text("user_agent"),
+    ip: text("ip"),
+    createdAt: timestamp("created_at").defaultNow()
+});
+
+export const oauthAccounts = pgTable("oauth_accounts", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull(),
+    provider: text("provider").notNull(),           // "google" | "github"
+    providerAccountId: text("provider_account_id").notNull(),
+    email: text("email"),
+    createdAt: timestamp("created_at").defaultNow()
+}, (t) => [unique().on(t.provider, t.providerAccountId)]);
+
+export const invitations = pgTable("invitations", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").notNull(),
+    email: text("email").notNull(),
+    role: text("role").default("member").notNull(),
+    token: text("token").notNull().unique(), // sha256 of the raw token
+    invitedById: uuid("invited_by_id").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    acceptedAt: timestamp("accepted_at"),
+    createdAt: timestamp("created_at").defaultNow()
+});
+
 export const passwordResetTokens = pgTable("password_reset_tokens", {
     id: uuid("id").defaultRandom().primaryKey(),
     userId: uuid("user_id").notNull(),

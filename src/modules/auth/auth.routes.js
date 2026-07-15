@@ -1,6 +1,7 @@
 import {
     signupHandler, loginHandler, meHandler, logoutHandler,
-    forgotPasswordHandler, resetPasswordHandler
+    forgotPasswordHandler, resetPasswordHandler,
+    verifyEmailHandler, resendVerificationHandler, refreshHandler,
 } from "./auth.controller.js";
 
 export default async function authRoutes(fastify) {
@@ -9,6 +10,9 @@ export default async function authRoutes(fastify) {
 
     fastify.post("/signup", authLimit, signupHandler);
     fastify.post("/login", authLimit, loginHandler);
+    fastify.post("/verify-email", authLimit, verifyEmailHandler);
+    fastify.post("/resend-verification", authLimit, resendVerificationHandler);
+    fastify.post("/refresh", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, refreshHandler);
     fastify.post("/logout", logoutHandler);
     fastify.post("/forgot-password", authLimit, forgotPasswordHandler);
     fastify.post("/reset-password", authLimit, resetPasswordHandler);

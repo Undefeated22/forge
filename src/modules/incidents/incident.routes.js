@@ -1,11 +1,14 @@
 import { createIncidentHandler, listIncidentsHandler } from "./incident.controller.js";
 import { uploadEvidenceHandler } from "./evidence.controller.js";
+import { PERMISSIONS } from "../auth/rbac.js";
 
 export default async function incidentRoutes(fastify) {
-    fastify.get("/", { preHandler: [fastify.authenticate] }, listIncidentsHandler);
+    fastify.get("/", {
+        preHandler: fastify.requirePermission(PERMISSIONS.INCIDENTS_READ),
+    }, listIncidentsHandler);
 
     fastify.post("/", {
-        preHandler: [fastify.authenticate],
+        preHandler: fastify.requirePermission(PERMISSIONS.INCIDENTS_CREATE),
         schema: {
             body: {
                 type: "object",
@@ -18,5 +21,7 @@ export default async function incidentRoutes(fastify) {
         }
     }, createIncidentHandler);
 
-    fastify.post("/:incidentId/files", { preHandler: [fastify.authenticate] }, uploadEvidenceHandler);
+    fastify.post("/:incidentId/files", {
+        preHandler: fastify.requirePermission(PERMISSIONS.EVIDENCE_UPLOAD),
+    }, uploadEvidenceHandler);
 }

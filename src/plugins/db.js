@@ -4,4 +4,4 @@ async function dbPlugin(fastify){
     fastify.decorate("db",db);
       console.log("DB plugin loaded");
 }
-export default fp(dbPlugin);
+export default fp(dbPlugin, { name: "db-plugin" });

@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { eq } from "drizzle-orm";
 import { incidents } from "../../db/schema.js";
 import { fheEvidenceQueue } from "../../queues/fheEvidence.queue.js";
+import { PERMISSIONS } from "../auth/rbac.js";
 
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
 
@@ -15,7 +16,7 @@ export default async function encryptedEvidenceRoutes(app) {
         );
     }
 
-    app.post("/:id/evidence/encrypted", { preHandler: app.authenticate }, async (req, reply) => {
+    app.post("/:id/evidence/encrypted", { preHandler: app.requirePermission(PERMISSIONS.EVIDENCE_UPLOAD) }, async (req, reply) => {
         const { id: incidentId } = req.params;
         const buf = req.body;
 

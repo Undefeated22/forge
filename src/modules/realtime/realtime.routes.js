@@ -1,11 +1,12 @@
 import { eq } from "drizzle-orm";
 import { incidents } from "../../db/schema.js";
 import { joinRoom, leaveRoom } from "../../events/subscriber.js";
+import { PERMISSIONS } from "../auth/rbac.js";
 
 export default async function realtimeRoutes(fastify) {
     fastify.get(
         "/ws/incidents/:incidentId",
-        { websocket: true, preHandler: [fastify.authenticate] },
+        { websocket: true, preHandler: fastify.requirePermission(PERMISSIONS.REALTIME_SUBSCRIBE) },
         async (socket, req) => {
             const { incidentId } = req.params;
             const tenantId = req.user.organizationId;
