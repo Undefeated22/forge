@@ -14,6 +14,9 @@ import { graphRoutes } from "./modules/graph/graph.routes.js";
 import encryptedEvidenceRoutes from "./modules/encryptedEvidence/encryptedEvidence.routes.js";
 import realtimeRoutes from "./modules/realtime/realtime.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
+import oauthRoutes from "./modules/auth/oauth.routes.js";
+import orgRoutes from "./modules/org/org.routes.js";
+import authPlugin from "./plugins/auth.js";
 import { runbookRoutes } from "./modules/runbooks/runbook.routes.js";
 import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
@@ -60,17 +63,14 @@ export function buildApp() {
     app.register(dbPlugin);
     app.register(websocket);
 
-    // ---- authenticate decorator: verifies token from cookie, sets req.user ----
-    app.decorate("authenticate", async function (req, reply) {
-        try {
-            await req.jwtVerify();
-        } catch (err) {
-            return reply.status(401).send({ error: "Unauthorized" });
-        }
-    });
+    // ---- authenticate + authorize decorators (DB-backed, RBAC) ----
+    app.register(authPlugin);
+
     app.register(encryptedEvidenceRoutes, { prefix: "/incidents" });
     app.register(healthRoute);
     app.register(authRoutes, { prefix: "/auth" });
+    app.register(oauthRoutes);
+    app.register(orgRoutes, { prefix: "/org" });
     app.register(incidentRoutes, { prefix: "/incidents" });
     app.register(analysisRoutes);
     app.register(reportRoutes, { prefix: "/reports" });
