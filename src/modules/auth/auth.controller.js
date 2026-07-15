@@ -16,7 +16,9 @@ import { eq } from "drizzle-orm";
 const COOKIE_NAME = "forge_token";
 const REFRESH_COOKIE = "forge_refresh";
 const isProd = process.env.NODE_ENV === "production";
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+// FRONTEND_URL may be a comma-separated list of allowed origins (CORS);
+// the first entry is the canonical one used for links and redirects
+const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:3000").split(",")[0].trim();
 
 const baseCookie = {
     httpOnly: true,

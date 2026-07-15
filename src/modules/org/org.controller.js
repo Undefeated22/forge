@@ -8,7 +8,8 @@ import { revokeAllUserRefreshTokens } from "../auth/token.service.js";
 import { validatePasswordStrength, issueSession } from "../auth/auth.controller.js";
 import { sendEmail } from "../auth/mailer.js";
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+// first entry of the comma-separated allowed-origins list is canonical
+const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:3000").split(",")[0].trim();
 
 export async function listMembersHandler(req, reply) {
     const rows = await req.server.db.select({
