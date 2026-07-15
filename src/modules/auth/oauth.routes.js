@@ -2,7 +2,8 @@ import oauthPlugin from "@fastify/oauth2";
 import { findOrCreateOAuthUser } from "./auth.service.js";
 import { issueSession } from "./auth.controller.js";
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+// first entry of the comma-separated allowed-origins list is canonical
+const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:3000").split(",")[0].trim();
 const APP_URL = process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`;
 
 // Providers register only when their credentials are present, so the app
