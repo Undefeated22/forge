@@ -40,14 +40,30 @@ export async function inviteMemberHandler(req, reply) {
     });
 
     const link = `${FRONTEND_URL}/accept-invitation/${raw}`;
-    await sendEmail(req.log, {
-        to: email,
-        subject: "You've been invited to Forge",
-        html: `<p>${req.user.email} invited you to join their Forge workspace as <b>${role}</b>.</p><p><a href="${link}">Accept invitation</a></p><p>This link expires in 7 days.</p>`,
-        actionLink: link,
-    });
+    let emailSent = true;
+    try {
+        await sendEmail(req.log, {
+            to: email,
+            subject: "You've been invited to Forge",
+            html: `<p>${req.user.email} invited you to join their Forge workspace as <b>${role}</b>.</p><p><a href="${link}">Accept invitation</a></p><p>This link expires in 7 days.</p>`,
+            actionLink: link,
+        });
+    } catch (err) {
+        // the invitation itself is valid — hand the inviter the link so they
+        // can share it out-of-band instead of failing the whole request
+        req.log.warn({ err }, "invitation email failed; returning link to inviter");
+        emailSent = false;
+    }
 
-    return reply.status(201).send({ success: true, message: `Invitation sent to ${email}` });
+    return reply.status(201).send({
+        success: true,
+        emailSent,
+        // only exposed to the inviter, who just created it
+        ...(emailSent ? {} : { inviteLink: link }),
+        message: emailSent
+            ? `Invitation sent to ${email}`
+            : `Invitation created, but the email could not be delivered. Share this link with ${email} directly.`,
+    });
 }
 
 export async function acceptInvitationHandler(req, reply) {
