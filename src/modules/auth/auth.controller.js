@@ -89,16 +89,27 @@ export async function signupHandler(req, reply) {
     // NO session here — the account is unusable until the email is verified
     const rawToken = await createVerificationToken(req.server.db, user.id);
     const link = `${FRONTEND_URL}/verify-email/${rawToken}`;
-    await sendEmail(req.log, {
-        to: user.email,
-        subject: "Verify your Forge account",
-        html: `<p>Confirm your email to activate your Forge account:</p><p><a href="${link}">Verify email</a></p><p>This link expires in 24 hours.</p>`,
-        actionLink: link,
-    });
+    let emailSent = true;
+    try {
+        await sendEmail(req.log, {
+            to: user.email,
+            subject: "Verify your Forge account",
+            html: `<p>Confirm your email to activate your Forge account:</p><p><a href="${link}">Verify email</a></p><p>This link expires in 24 hours.</p>`,
+            actionLink: link,
+        });
+    } catch (err) {
+        // account exists either way — a 500 here would strand the user with an
+        // account they don't know about and can't verify
+        req.log.warn({ err }, "verification email failed at signup");
+        emailSent = false;
+    }
 
     return reply.status(201).send({
         success: true,
-        message: "Account created. Check your email to verify your address before signing in.",
+        emailSent,
+        message: emailSent
+            ? "Account created. Check your email to verify your address before signing in."
+            : "Account created, but the verification email could not be delivered. Try 'resend verification' later or contact support.",
     });
 }
 
@@ -121,12 +132,16 @@ export async function resendVerificationHandler(req, reply) {
     if (user && !user.emailVerified) {
         const rawToken = await createVerificationToken(req.server.db, user.id);
         const link = `${FRONTEND_URL}/verify-email/${rawToken}`;
-        await sendEmail(req.log, {
-            to: user.email,
-            subject: "Verify your Forge account",
-            html: `<p>Confirm your email to activate your Forge account:</p><p><a href="${link}">Verify email</a></p>`,
-            actionLink: link,
-        });
+        try {
+            await sendEmail(req.log, {
+                to: user.email,
+                subject: "Verify your Forge account",
+                html: `<p>Confirm your email to activate your Forge account:</p><p><a href="${link}">Verify email</a></p>`,
+                actionLink: link,
+            });
+        } catch (err) {
+            req.log.warn({ err }, "resend-verification email failed");
+        }
     }
     return reply.send({ success: true, message: "If that account exists and is unverified, a new link has been sent." });
 }
@@ -225,12 +240,17 @@ export async function forgotPasswordHandler(req, reply) {
         await createResetToken(req.server.db, user.id, token, expiresAt);
 
         const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
-        await sendEmail(req.log, {
-            to: user.email,
-            subject: "Reset your Forge password",
-            html: `<p>Someone requested a password reset for this account.</p><p><a href="${resetLink}">Reset password</a></p><p>This link expires in 1 hour. If this wasn't you, ignore this email.</p>`,
-            actionLink: resetLink,
-        });
+        try {
+            await sendEmail(req.log, {
+                to: user.email,
+                subject: "Reset your Forge password",
+                html: `<p>Someone requested a password reset for this account.</p><p><a href="${resetLink}">Reset password</a></p><p>This link expires in 1 hour. If this wasn't you, ignore this email.</p>`,
+                actionLink: resetLink,
+            });
+        } catch (err) {
+            // a 500 here would also leak which emails have accounts
+            req.log.warn({ err }, "password-reset email failed");
+        }
     }
 
     return reply.send({ success: true, message: "If an account exists for that email, a reset link has been sent." });
