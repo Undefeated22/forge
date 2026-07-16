@@ -1,3 +1,7 @@
+// Dev-only sanity check. Requires a test-features build:
+//   npm run build:test-features
+// (the committed binary is the prod build, which excludes the keygen/encrypt/
+// decrypt helpers — rebuild with `npm run build` before committing again)
 import native from './index.js';
 
 const { clientKey, serverKey } = native.keygenForLocalTesting();

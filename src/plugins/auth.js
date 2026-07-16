@@ -1,6 +1,6 @@
 import fp from "fastify-plugin";
-import { eq } from "drizzle-orm";
-import { users } from "../db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { users, orgMemberships } from "../db/schema.js";
 import { roleHasPermission } from "../modules/auth/rbac.js";
 
 // authenticate: verifies the access JWT, then re-checks the user row so that
@@ -23,12 +23,29 @@ async function authPlugin(fastify) {
             return reply.status(403).send({ error: "Email not verified", code: "EMAIL_NOT_VERIFIED" });
         }
 
-        // fresh values from the DB win over whatever the JWT was signed with
+        // org context comes from the membership table, not the users row: the
+        // same account can belong to several orgs with a different role in
+        // each. users.organizationId is just the active-org pointer.
+        const memberships = await fastify.db.select().from(orgMemberships).where(and(
+            eq(orgMemberships.userId, user.id),
+            eq(orgMemberships.status, "active"),
+        ));
+        const active = memberships.find((m) => m.organizationId === user.organizationId)
+            ?? memberships[0] ?? null;
+
+        // re-sync the cached pointer/role when stale (org switch elsewhere,
+        // role change, or removal from the org the pointer referenced)
+        if ((active?.organizationId ?? null) !== user.organizationId || (active?.role ?? null) !== user.role) {
+            await fastify.db.update(users)
+                .set({ organizationId: active?.organizationId ?? null, role: active?.role ?? null })
+                .where(eq(users.id, user.id));
+        }
+
         req.user = {
             id: user.id,
             email: user.email,
-            organizationId: user.organizationId,
-            role: user.role,
+            organizationId: active?.organizationId ?? null,
+            role: active?.role ?? null,
         };
     });
 

@@ -28,6 +28,33 @@ pub fn homomorphic_add(ct_a: Buffer, ct_b: Buffer, server_key: Buffer) -> Result
     Ok(Buffer::from(ser(&result, "result ciphertext")?))
 }
 
+// One-shot evidence pipeline: baseline + input, then threshold on the sum.
+// Loads (deserializes + decompresses) the server key ONCE — the key load
+// dominates single-op latency, so fusing the two ops nearly halves it.
+#[napi(object)]
+pub struct EvidenceResult {
+    pub updated_baseline: Buffer,
+    pub anomaly_flag: Buffer,
+}
+
+#[napi]
+pub fn process_evidence(
+    input_ct: Buffer,
+    baseline_ct: Buffer,
+    server_key: Buffer,
+    threshold: u32,
+) -> Result<EvidenceResult> {
+    load_server_key(&server_key)?;
+    let input: FheUint16 = de(&input_ct, "ciphertext a")?;
+    let baseline: FheUint16 = de(&baseline_ct, "ciphertext b")?;
+    let sum = &input + &baseline;
+    let flag: FheBool = sum.ge(threshold as u16);
+    Ok(EvidenceResult {
+        updated_baseline: Buffer::from(ser(&sum, "result ciphertext")?),
+        anomaly_flag: Buffer::from(ser(&flag, "anomaly flag ciphertext")?),
+    })
+}
+
 #[napi]
 pub fn apply_anomaly_threshold(ct: Buffer, server_key: Buffer, threshold: u32) -> Result<Buffer> {
     load_server_key(&server_key)?;

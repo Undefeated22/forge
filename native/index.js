@@ -310,11 +310,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { homomorphicAdd, applyAnomalyThreshold, keygenForLocalTesting, encryptForTesting, decryptForTesting, decryptBoolForTesting } = nativeBinding
+const { homomorphicAdd, processEvidence, applyAnomalyThreshold } = nativeBinding
 
 module.exports.homomorphicAdd = homomorphicAdd
+module.exports.processEvidence = processEvidence
 module.exports.applyAnomalyThreshold = applyAnomalyThreshold
-module.exports.keygenForLocalTesting = keygenForLocalTesting
-module.exports.encryptForTesting = encryptForTesting
-module.exports.decryptForTesting = decryptForTesting
-module.exports.decryptBoolForTesting = decryptBoolForTesting

@@ -1,7 +1,7 @@
 import bcrypt from "bcrypt";
 import {
     users, organizations, passwordResetTokens,
-    emailVerificationTokens, oauthAccounts, invitations
+    emailVerificationTokens, oauthAccounts, invitations, orgMemberships
 } from "../../db/schema.js";
 import { eq, and, sql } from "drizzle-orm";
 import crypto from "crypto";
@@ -32,8 +32,41 @@ export async function createUserWithOrganization(db, email, passwordHash, orgNam
             organizationId: org.id,
             role: "owner",
         }).returning();
+        await tx.insert(orgMemberships).values({
+            userId: user.id, organizationId: org.id, role: "owner",
+        });
         return { org, user };
     });
+}
+
+// ---------- memberships ----------
+
+export async function listUserMemberships(db, userId) {
+    return db.select({
+        organizationId: orgMemberships.organizationId,
+        organizationName: organizations.name,
+        role: orgMemberships.role,
+        status: orgMemberships.status,
+        joinedAt: orgMemberships.createdAt,
+    }).from(orgMemberships)
+        .leftJoin(organizations, eq(orgMemberships.organizationId, organizations.id))
+        .where(eq(orgMemberships.userId, userId));
+}
+
+export async function findMembership(db, userId, organizationId) {
+    const rows = await db.select().from(orgMemberships).where(and(
+        eq(orgMemberships.userId, userId),
+        eq(orgMemberships.organizationId, organizationId),
+    ));
+    return rows[0] ?? null;
+}
+
+// point the user's session at one of their active memberships and sync the
+// cached organizationId/role on the users row
+export async function setActiveOrganization(db, userId, membership) {
+    await db.update(users)
+        .set({ organizationId: membership?.organizationId ?? null, role: membership?.role ?? null })
+        .where(eq(users.id, userId));
 }
 
 export function generateResetToken() {
@@ -152,6 +185,9 @@ export async function findOrCreateOAuthUser(db, { provider, providerAccountId, e
                 role: "owner",
                 emailVerified: true, // the provider already verified it
             }).returning();
+            await tx.insert(orgMemberships).values({
+                userId: user.id, organizationId: org.id, role: "owner",
+            });
             created = true;
         } else if (!user.emailVerified) {
             // provider vouches for the address — mark verified so login works
@@ -197,6 +233,28 @@ export async function acceptInvitation(db, invitation, passwordHash) {
             role: invitation.role,
             emailVerified: true, // the invite link proves control of the mailbox
         }).returning();
+        await tx.insert(orgMemberships).values({
+            userId: user.id, organizationId: invitation.organizationId, role: invitation.role,
+        });
+        await tx.update(invitations).set({ acceptedAt: new Date() })
+            .where(eq(invitations.id, invitation.id));
+        return user;
+    });
+}
+
+// existing account joining another org: upsert the membership (reinstates a
+// previously-suspended one at the invited role) and make it the active org
+export async function acceptInvitationAsExistingUser(db, invitation, userId) {
+    return db.transaction(async (tx) => {
+        await tx.insert(orgMemberships).values({
+            userId, organizationId: invitation.organizationId, role: invitation.role,
+        }).onConflictDoUpdate({
+            target: [orgMemberships.userId, orgMemberships.organizationId],
+            set: { role: invitation.role, status: "active" },
+        });
+        const [user] = await tx.update(users)
+            .set({ organizationId: invitation.organizationId, role: invitation.role })
+            .where(eq(users.id, userId)).returning();
         await tx.update(invitations).set({ acceptedAt: new Date() })
             .where(eq(invitations.id, invitation.id));
         return user;

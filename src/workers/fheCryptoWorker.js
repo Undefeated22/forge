@@ -11,33 +11,39 @@ const require = createRequire(import.meta.url);
 const native = require('../../native/index.js');
 
 async function run() {
-  const { tenantId, payload, serverKeyBytes, baselineCiphertext } = workerData;
+  const { tenantId, payload, serverKeyBytes, baselineCiphertext, threshold } = workerData;
 
   try {
-    const incomingCiphertext = Buffer.from(payload, 'base64');
-    const serverKeyBuf = Buffer.from(serverKeyBytes, 'base64');
-    const baselineBuf = Buffer.from(baselineCiphertext, 'base64');
+    // workerData's structured clone strips the Buffer prototype — re-wrap
+    const incoming = Buffer.from(payload);
+    const serverKeyBuf = Buffer.from(serverKeyBytes);
 
-    // Real homomorphic addition against the tenant's running baseline.
-    const combinedCiphertext = native.homomorphicAdd(
-      incomingCiphertext,
-      baselineBuf,
-      serverKeyBuf
-    );
+    if (!baselineCiphertext) {
+      // Seeding the tenant's first baseline. Running the threshold op forces
+      // a full deserialize of the incoming ciphertext under the tenant's key,
+      // so garbage can never seed (and later poison) the baseline — and the
+      // first row gets a real anomaly flag instead of a copy of the input.
+      const anomalyFlag = native.applyAnomalyThreshold(incoming, serverKeyBuf, threshold);
+      parentPort.postMessage({
+        tenantId,
+        updatedBaselineCiphertext: incoming,
+        anomalyFlagCiphertext: anomalyFlag,
+      });
+      return;
+    }
 
-    // Real PBS-backed comparison: is the combined value >= threshold?
-    // TODO: threshold should come from per-tenant config once that exists;
-    // hardcoded here as a placeholder for the prototype.
-    const anomalyFlagCiphertext = native.applyAnomalyThreshold(
-      combinedCiphertext,
+    // Fused add + PBS-backed compare: one server-key load instead of two.
+    const result = native.processEvidence(
+      incoming,
+      Buffer.from(baselineCiphertext),
       serverKeyBuf,
-      10000 // placeholder threshold
+      threshold
     );
 
     parentPort.postMessage({
       tenantId,
-      updatedBaselineCiphertext: combinedCiphertext.toString('base64'),
-      anomalyFlagCiphertext: anomalyFlagCiphertext.toString('base64'),
+      updatedBaselineCiphertext: result.updatedBaseline,
+      anomalyFlagCiphertext: result.anomalyFlag,
     });
   } catch (err) {
     parentPort.postMessage({ error: err.message });

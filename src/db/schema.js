@@ -1,4 +1,8 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, boolean, unique } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, integer, boolean, unique, index, uniqueIndex, customType } from "drizzle-orm/pg-core";
+
+// raw bytes at rest — TFHE key/ciphertext material is incompressible, so the
+// one real size lever is dropping the 33% base64-in-text overhead
+const bytea = customType({ dataType: () => "bytea" });
 
 export const organizations = pgTable("organizations", {
     id: uuid("id").defaultRandom().primaryKey(),
@@ -11,7 +15,10 @@ export const users = pgTable("users", {
     email: text("email").notNull().unique(),
     // nullable: OAuth-only accounts have no password
     passwordHash: text("password_hash"),
-    organizationId: uuid("organization_id"),  // which org they belong to
+    // organizationId/role mirror the user's ACTIVE org_membership row — the
+    // membership table is authoritative; these exist so JWT claims and login
+    // responses don't need a join, and are re-synced on every authenticate
+    organizationId: uuid("organization_id"),
     role: text("role").default("member"),     // "owner" | "admin" | "member" | "viewer"
     emailVerified: boolean("email_verified").default(false).notNull(),
     status: text("status").default("active").notNull(), // "active" | "suspended"
@@ -23,6 +30,18 @@ export const users = pgTable("users", {
     lastLoginAt: timestamp("last_login_at"),
     createAt: timestamp("created_at").defaultNow()
 });
+
+// one row per (user, org): the same account can be owner of its own workspace
+// and member/viewer of others. "Removing" a member suspends the membership,
+// never the account.
+export const orgMemberships = pgTable("org_memberships", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull(),
+    organizationId: uuid("organization_id").notNull(),
+    role: text("role").default("member").notNull(), // "owner" | "admin" | "member" | "viewer"
+    status: text("status").default("active").notNull(), // "active" | "suspended"
+    createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [unique().on(t.userId, t.organizationId)]);
 
 export const emailVerificationTokens = pgTable("email_verification_tokens", {
     id: uuid("id").defaultRandom().primaryKey(),
@@ -128,10 +147,10 @@ export const causalGraphEdges = pgTable("causal_graph_edges", {
 export const tenantFheKeys = pgTable("tenant_fhe_keys", {
     id: uuid("id").defaultRandom().primaryKey(),
     tenantId: text("tenant_id").default("default").notNull(),
-    // Bincode-serialized tfhe::ServerKey bytes, base64. Public by design —
+    // Bincode-serialized tfhe::CompressedServerKey bytes. Public by design —
     // this lets Forge COMPUTE on ciphertexts, never decrypt them. The
     // secret client key never touches this schema or this server.
-    serverKeyBytes: text("server_key_bytes").notNull(),
+    serverKeyBytes: bytea("server_key_bytes").notNull(),
     createdAt: timestamp("created_at").defaultNow()
 });
 
@@ -139,9 +158,15 @@ export const encryptedEvidence = pgTable("encrypted_evidence", {
     id: uuid("id").defaultRandom().primaryKey(),
     incidentId: uuid("incident_id").notNull(),
     tenantId: text("tenant_id").default("default").notNull(),
-    inputCiphertext: text("input_ciphertext").notNull(),
-    updatedBaselineCiphertext: text("updated_baseline_ciphertext").notNull(),
-    anomalyFlagCiphertext: text("anomaly_flag_ciphertext").notNull(),
+    inputCiphertext: bytea("input_ciphertext").notNull(),
+    updatedBaselineCiphertext: bytea("updated_baseline_ciphertext").notNull(),
+    anomalyFlagCiphertext: bytea("anomaly_flag_ciphertext").notNull(),
+    // sha256 of the input ciphertext bytes: dedupe compares 64-char hashes on
+    // an index instead of ~130KB ciphertext values row-by-row
+    inputHash: text("input_hash").notNull(),
     status: text("status").default("processing").notNull(),
     createdAt: timestamp("created_at").defaultNow()
-});
+}, (t) => [
+    uniqueIndex("encrypted_evidence_tenant_incident_hash_idx").on(t.tenantId, t.incidentId, t.inputHash),
+    index("encrypted_evidence_tenant_created_idx").on(t.tenantId, t.createdAt.desc()),
+]);

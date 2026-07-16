@@ -6,6 +6,7 @@ import { fheEvidenceQueue } from "../../queues/fheEvidence.queue.js";
 import { PERMISSIONS } from "../auth/rbac.js";
 
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export default async function encryptedEvidenceRoutes(app) {
     if (!app.hasContentTypeParser("application/octet-stream")) {
@@ -23,6 +24,11 @@ export default async function encryptedEvidenceRoutes(app) {
         const tenantId = req.user?.organizationId;
         if (!tenantId) {
             return reply.status(401).send({ error: "Unauthenticated" });
+        }
+
+        // malformed id would throw inside drizzle and surface as a 500
+        if (!UUID_RE.test(incidentId)) {
+            return reply.status(404).send({ error: "Incident not found" });
         }
 
         // verify the incident belongs to the caller's org
