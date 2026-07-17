@@ -22,6 +22,7 @@ import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
+import compress from "@fastify/compress";
 
 export function buildApp() {
     const app = Fastify({ logger: true, trustProxy: true });
@@ -38,6 +39,10 @@ export function buildApp() {
     // ---- helmet + rate-limit MUST register before any route plugin: Fastify
     // only applies a plugin's hooks to routes registered after it. ----
     app.register(helmet);
+    // JSON responses (graph dumps, AI report payloads) previously left the
+    // server uncompressed — br/gzip based on Accept-Encoding, small responses
+    // (<1KB default threshold) skip it.
+    app.register(compress);
     app.register(rateLimit, {
         max: 100,                 // 100 requests
         timeWindow: "1 minute",   // per IP per minute, globally
