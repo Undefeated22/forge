@@ -51,7 +51,7 @@ export const worker = new Worker(
         // 4b. Semantic memory: embed this incident so future incidents can
         // recall it by vector similarity. Best-effort — never fail the job.
         try {
-            const embedInput = await getIncidentEmbeddingInput(db, incidentId);
+            const embedInput = await getIncidentEmbeddingInput(db, incidentId, tenantId);
             const embedding = await embedText(embedInput, "RETRIEVAL_DOCUMENT");
             const fp = aiAnalysis?.incidentFingerprint ?? {};
             await storeIncidentEmbedding(db, {

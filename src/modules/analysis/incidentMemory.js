@@ -1,7 +1,7 @@
-import { sql, eq } from "drizzle-orm";
-import { evidence } from "../../db/schema.js";
+import { sql } from "drizzle-orm";
 import { fuseLogs } from "./logFusion.js";
 import { embedText, toSqlVector } from "../../lib/embeddings.js";
+import { getEvidenceForIncident } from "../incidents/evidence.repository.js";
 
 // How much of the fused telemetry represents an incident for embedding. Both
 // storage and query embed the SAME kind of text (the fused-timeline head) so
@@ -20,11 +20,8 @@ const DEFAULT_MIN_SIMILARITY = 0.70;
  * Build the canonical text we embed for an incident: the head of its fused,
  * deduped, chronologically-ordered telemetry. Returns "" when there's nothing.
  */
-export async function getIncidentEmbeddingInput(db, incidentId) {
-    const records = await db
-        .select()
-        .from(evidence)
-        .where(eq(evidence.incidentId, incidentId));
+export async function getIncidentEmbeddingInput(db, incidentId, tenantId = "default") {
+    const records = await getEvidenceForIncident(db, incidentId, tenantId);
     if (!records.length) return "";
     const { fused } = fuseLogs(records);
     return fused.slice(0, EMBED_INPUT_CHARS);
@@ -80,7 +77,7 @@ export async function findSimilarIncidents(db, { tenantId = "default", embedding
  * similar past incidents in one call.
  */
 export async function recallSimilarIncidents(db, { incidentId, tenantId = "default", telemetry, k, minSimilarity } = {}) {
-    const text = telemetry ?? (await getIncidentEmbeddingInput(db, incidentId));
+    const text = telemetry ?? (await getIncidentEmbeddingInput(db, incidentId, tenantId));
     const queryVec = await embedText(text, "RETRIEVAL_QUERY");
     if (!queryVec) return [];
     return findSimilarIncidents(db, { tenantId, embedding: queryVec, excludeIncidentId: incidentId, k, minSimilarity });

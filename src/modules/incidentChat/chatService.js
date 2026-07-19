@@ -1,22 +1,9 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateStream } from "../../lib/llm.js";
 import { buildIncidentAnswerContext } from "./hybridContext.js";
 
 // Hard ceiling on a single answer stream. Without it, a hung model call would
 // wedge the socket forever (the route's `answering` guard would never clear).
 const STREAM_TIMEOUT_MS = 45_000;
-
-// Lazily construct the client so this module (and pure helpers like
-// buildChatPrompt) import fine without the key; the check fires when we actually
-// call the model.
-let genAI;
-function getChatModel() {
-    if (!process.env.GEMINI_API_KEY) {
-        throw new Error("Missing required environment variable: GEMINI_API_KEY");
-    }
-    genAI ??= new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    // Plain-text (not JSON) model for conversational answers.
-    return genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-}
 
 /** Render prior turns as a compact transcript for multi-turn continuity. */
 function formatHistory(history) {
@@ -55,14 +42,11 @@ export async function* streamIncidentAnswer(db, { incidentId, tenantId, question
     const { context, sources } = await buildIncidentAnswerContext(db, { incidentId, tenantId, question, cache });
     const prompt = buildChatPrompt({ context, history, question });
 
-    const model = getChatModel();
     // Abort the stream if the model stalls, so the caller's turn always ends.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
     try {
-        const result = await model.generateContentStream(prompt, { signal: controller.signal });
-        for await (const chunk of result.stream) {
-            const text = chunk.text();
+        for await (const text of generateStream(prompt, { signal: controller.signal })) {
             if (text) yield { type: "token", text };
         }
         yield { type: "done", sources };
