@@ -1,6 +1,5 @@
-import { eq } from "drizzle-orm";
-import { evidence } from "../../db/schema.js";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateJson } from "../../lib/llm.js";
+import { getEvidenceForIncident } from "../incidents/evidence.repository.js";
 import { fuseLogs } from "./logFusion.js";
 import { getBestGraphContext, formatGraphContextForPrompt } from "./graphReader.js";
 import { chunkText, shouldEscalate, mapWithConcurrency } from "./chunker.js";
@@ -10,11 +9,6 @@ import { RagPipeline } from "../../rag/pipeline.js";
 // Collection holding the org's ingested runbooks/architecture docs, used to
 // ground mitigation steps in real procedures instead of the model's guesses.
 const RUNBOOK_COLLECTION = "runbooks";
-
-if (!process.env.GEMINI_API_KEY) {
-    throw new Error("Missing required environment variable: GEMINI_API_KEY");
-}
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Fast pass: how much fused telemetry we send in a single call. Beyond this we
 // either truncate (confident answer) or escalate to the deep map-reduce pass.
@@ -26,30 +20,18 @@ const CHUNK_CHARS = 120_000;
 const MAX_CHUNKS = 12;
 const MAP_CONCURRENCY = 4;
 
-function getModel() {
-    return genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        generationConfig: { responseMimeType: "application/json" },
-    });
-}
-
 /**
  * Analyze an incident's evidence. Runs a fast single-call pass; if that pass
  * only saw a truncated view of a large log AND came back unsure, it escalates to
  * a map-reduce pass over the full fused timeline before returning.
  */
 export async function analyzeEvidence(db, incidentId, tenantId = "default") {
-    const records = await db
-        .select()
-        .from(evidence)
-        .where(eq(evidence.incidentId, incidentId));
+    const records = await getEvidenceForIncident(db, incidentId, tenantId);
 
     if (!records.length) return null;
 
     const { fused: fusedFull, lineCount, sourceCount } = fuseLogs(records);
     const truncated = fusedFull.length > MAX_FUSED_CHARS;
-
-    const model = getModel();
 
     // Historical memory comes from two complementary sources, merged into one
     // prompt block: the causal graph (exact component-name matches + blast
@@ -95,7 +77,7 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default") {
         : fusedFull;
 
     const fastPrompt = buildRcaPrompt({ telemetry: head, sourceCount, lineCount, historicalMemory, runbookContext });
-    const fastResult = JSON.parse(await callWithRetry(model, fastPrompt));
+    const fastResult = JSON.parse(await generateJson(fastPrompt));
 
     const confidence = fastResult?.confidenceMatrix?.overallScore;
     if (!shouldEscalate({ truncated, confidence })) {
@@ -107,7 +89,7 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default") {
         `[Analysis] Fast pass low-confidence (${confidence ?? "n/a"}) on a truncated ${lineCount}-line log — escalating to map-reduce.`
     );
     try {
-        return await deepAnalyze(model, {
+        return await deepAnalyze({
             fusedFull,
             sourceCount,
             lineCount,
@@ -122,14 +104,14 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default") {
     }
 }
 
-async function deepAnalyze(model, { fusedFull, sourceCount, lineCount, historicalMemory, runbookContext }) {
+async function deepAnalyze({ fusedFull, sourceCount, lineCount, historicalMemory, runbookContext }) {
     const chunks = chunkText(fusedFull, CHUNK_CHARS).slice(0, MAX_CHUNKS);
 
     // MAP: extract compact structured findings from each chunk in parallel.
     const digests = await mapWithConcurrency(chunks, MAP_CONCURRENCY, async (chunk, i) => {
         const prompt = buildMapPrompt(chunk, i, chunks.length);
         try {
-            return await callWithRetry(model, prompt);
+            return await generateJson(prompt);
         } catch (err) {
             console.error(`[Analysis] Chunk ${i + 1}/${chunks.length} map failed:`, err.message);
             return null;
@@ -152,7 +134,7 @@ async function deepAnalyze(model, { fusedFull, sourceCount, lineCount, historica
         runbookContext,
         telemetryLabel: "PRE-ANALYZED EVIDENCE DIGEST (map-reduced from the full log)",
     });
-    return JSON.parse(await callWithRetry(model, reducePrompt));
+    return JSON.parse(await generateJson(reducePrompt));
 }
 
 function buildMapPrompt(chunk, index, total) {
@@ -249,31 +231,4 @@ Return EXACTLY this JSON structure. Do not include markdown formatting like \`\`
 ${telemetryLabel ?? `FUSED TELEMETRY TIMELINE (${sourceCount} source(s), ${lineCount} lines)`}:
 ${telemetry}
     `;
-}
-
-const GEMINI_TIMEOUT_MS = 60_000;
-
-async function callWithRetry(model, prompt, maxRetries = 4) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            const result = await model.generateContent(prompt, { timeout: GEMINI_TIMEOUT_MS });
-            return result.response.text();
-        } catch (error) {
-            const msg = error.message ?? "";
-            const isRetryable =
-                msg.includes("503") ||
-                msg.includes("high demand") ||
-                msg.includes("fetch failed") ||
-                msg.includes("ECONNRESET") ||
-                msg.includes("ETIMEDOUT") ||
-                msg.includes("aborted") ||
-                msg.includes("network");
-
-            if (!isRetryable || attempt === maxRetries) throw error;
-
-            const waitMs = 5000 * attempt;
-            console.log(`[Analysis] Transient error (${msg.slice(0, 40)}) — attempt ${attempt}/${maxRetries}, retrying in ${waitMs / 1000}s...`);
-            await new Promise(r => setTimeout(r, waitMs));
-        }
-    }
 }

@@ -6,6 +6,7 @@ import { reduceLogStream } from "./streamReduce.js";
 import { createRedactor } from "../../lib/redaction.js";
 import { redactionEnabled } from "../../lib/redactionCrypto.js";
 import { persistRedactions, loadRedactionSeed } from "./redactionStore.js";
+import { encryptField } from "../../lib/fieldCrypto.js";
 
 export async function uploadEvidenceHandler(req, reply) {
     try {
@@ -45,8 +46,12 @@ export async function uploadEvidenceHandler(req, reply) {
             const { reducedText, totalLines, totalBytes, retainedLines, severeLines, truncated } =
                 await reduceLogStream(part.file, { filename: part.filename });
 
-            // Tokenize secrets/PII out of the text we persist and analyze.
-            const storedText = redactor ? redactor.redact(reducedText) : reducedText;
+            // Defense in depth: redact secrets/PII out of the text, THEN encrypt
+            // the remaining operational content at rest (per-tenant AES-GCM). The
+            // stored value is unreadable in a raw DB dump; it's decrypted only
+            // in-process at analysis time. Both are gated on REDACTION_KEY.
+            const redactedText = redactor ? redactor.redact(reducedText) : reducedText;
+            const storedText = encryptField(tenantId, redactedText);
 
             req.log.info(
                 `[Evidence] ${part.filename}: ${(totalBytes / 1048576).toFixed(1)}MB, ` +

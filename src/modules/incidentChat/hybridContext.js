@@ -6,6 +6,7 @@ import { findSimilarIncidents, formatSimilarIncidentsForPrompt } from "../analys
 import { embedText } from "../../lib/embeddings.js";
 import { fuseLogs } from "../analysis/logFusion.js";
 import { tokenize } from "../../rag/rerank.js";
+import { getEvidenceForIncident } from "../incidents/evidence.repository.js";
 
 // Assembles the grounded context an engineer's question is answered from. This
 // is the "hybrid search" heart of the workspace — it pulls from BOTH retrieval
@@ -63,14 +64,14 @@ export function summarizeReport(aiPayload) {
  * evidence set is unchanged. Keyed on row count so a mid-incident upload of new
  * evidence correctly invalidates the cache (correctness over a micro-optimization).
  */
-async function getFusedEvidence(db, incidentId, cache) {
+async function getFusedEvidence(db, incidentId, tenantId, cache) {
     const [{ n }] = await db
         .select({ n: sql`count(*)::int` })
         .from(evidence)
         .where(eq(evidence.incidentId, incidentId));
     if (cache && cache.fused !== undefined && cache.fusedCount === n) return cache.fused;
 
-    const evRows = await db.select().from(evidence).where(eq(evidence.incidentId, incidentId));
+    const evRows = await getEvidenceForIncident(db, incidentId, tenantId);
     const { fused } = fuseLogs(evRows);
     if (cache) { cache.fused = fused; cache.fusedCount = n; }
     return fused;
@@ -89,7 +90,7 @@ export async function buildIncidentAnswerContext(db, { incidentId, tenantId, que
         .orderBy(desc(reports.createdAt))
         .limit(1);
 
-    const fused = await getFusedEvidence(db, incidentId, cache);
+    const fused = await getFusedEvidence(db, incidentId, tenantId, cache);
     const qTerms = tokenize(question);
 
     // --- fan out the retrieval arms in parallel ---
