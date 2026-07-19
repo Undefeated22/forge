@@ -12,6 +12,9 @@ export const PERMISSIONS = Object.freeze({
     GRAPH_READ: "graph:read",
     GRAPH_WRITE: "graph:write",
     RUNBOOKS_READ: "runbooks:read",
+    KNOWLEDGE_READ: "knowledge:read",     // search the RAG knowledge base
+    KNOWLEDGE_WRITE: "knowledge:write",   // ingest/delete knowledge-base docs
+    INCIDENT_CHAT: "incident:chat",       // ask the AI copilot (invokes the LLM, writes the transcript)
     REALTIME_SUBSCRIBE: "realtime:subscribe",
     MEMBERS_READ: "org:members:read",
     MEMBERS_INVITE: "org:members:invite",
@@ -24,6 +27,7 @@ const VIEWER = [
     PERMISSIONS.REPORTS_READ,
     PERMISSIONS.GRAPH_READ,
     PERMISSIONS.RUNBOOKS_READ,
+    PERMISSIONS.KNOWLEDGE_READ,
     PERMISSIONS.REALTIME_SUBSCRIBE,
     PERMISSIONS.MEMBERS_READ,
 ];
@@ -34,6 +38,8 @@ const MEMBER = [
     PERMISSIONS.EVIDENCE_UPLOAD,
     PERMISSIONS.ANALYSIS_RUN,
     PERMISSIONS.GRAPH_WRITE,
+    PERMISSIONS.KNOWLEDGE_WRITE,
+    PERMISSIONS.INCIDENT_CHAT,
 ];
 
 const ADMIN = [

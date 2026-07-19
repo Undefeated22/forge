@@ -3,13 +3,42 @@ import { evidence } from "../../db/schema.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { fuseLogs } from "./logFusion.js";
 import { getBestGraphContext, formatGraphContextForPrompt } from "./graphReader.js";
+import { chunkText, shouldEscalate, mapWithConcurrency } from "./chunker.js";
+import { recallSimilarIncidents, formatSimilarIncidentsForPrompt } from "./incidentMemory.js";
+import { RagPipeline } from "../../rag/pipeline.js";
+
+// Collection holding the org's ingested runbooks/architecture docs, used to
+// ground mitigation steps in real procedures instead of the model's guesses.
+const RUNBOOK_COLLECTION = "runbooks";
 
 if (!process.env.GEMINI_API_KEY) {
     throw new Error("Missing required environment variable: GEMINI_API_KEY");
 }
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-export async function analyzeEvidence(db, incidentId, tenantId = "default") {
 
+// Fast pass: how much fused telemetry we send in a single call. Beyond this we
+// either truncate (confident answer) or escalate to the deep map-reduce pass.
+const MAX_FUSED_CHARS = 150_000;
+// Deep pass: per-chunk size for the map step. Comfortably inside the model's
+// context so each chunk gets full attention.
+const CHUNK_CHARS = 120_000;
+// Cap the deep fan-out so one incident can't launch unbounded model calls.
+const MAX_CHUNKS = 12;
+const MAP_CONCURRENCY = 4;
+
+function getModel() {
+    return genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        generationConfig: { responseMimeType: "application/json" },
+    });
+}
+
+/**
+ * Analyze an incident's evidence. Runs a fast single-call pass; if that pass
+ * only saw a truncated view of a large log AND came back unsure, it escalates to
+ * a map-reduce pass over the full fused timeline before returning.
+ */
+export async function analyzeEvidence(db, incidentId, tenantId = "default") {
     const records = await db
         .select()
         .from(evidence)
@@ -18,29 +47,139 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default") {
     if (!records.length) return null;
 
     const { fused: fusedFull, lineCount, sourceCount } = fuseLogs(records);
+    const truncated = fusedFull.length > MAX_FUSED_CHARS;
 
-    // Cap what we ship to the model: huge log dumps blow the context window
-    // (hard failure) and the token bill (soft one). Keep the head — incidents
-    // are fused chronologically, so the earliest lines carry the trigger.
-    const MAX_FUSED_CHARS = 150_000;
-    const fused = fusedFull.length > MAX_FUSED_CHARS
+    const model = getModel();
+
+    // Historical memory comes from two complementary sources, merged into one
+    // prompt block: the causal graph (exact component-name matches + blast
+    // radius) and pgvector semantic recall (incidents that *look like* this one
+    // even when the components are named differently). Both are best-effort —
+    // a failure in either must not block the analysis.
+    const graphContext = await getBestGraphContext(db, fusedFull.slice(0, MAX_FUSED_CHARS), tenantId);
+    const graphMemory = formatGraphContextForPrompt(graphContext);
+
+    let semanticMemory = "";
+    try {
+        const similar = await recallSimilarIncidents(db, {
+            incidentId,
+            tenantId,
+            telemetry: fusedFull.slice(0, MAX_FUSED_CHARS),
+        });
+        if (similar.length) {
+            semanticMemory = formatSimilarIncidentsForPrompt(similar);
+            console.log(`[Analysis] Semantic memory: ${similar.length} similar past incident(s) recalled.`);
+        }
+    } catch (err) {
+        console.error("[Analysis] Semantic memory lookup failed:", err.message);
+    }
+
+    const historicalMemory = [graphMemory, semanticMemory].filter(Boolean).join("\n\n");
+
+    // RAG grounding: retrieve the org's own runbook/architecture-doc excerpts
+    // relevant to this telemetry, so mitigation steps cite documented procedures
+    // instead of hallucinated commands. Best-effort — never blocks analysis.
+    let runbookContext = "";
+    try {
+        const rag = new RagPipeline({ db, collection: RUNBOOK_COLLECTION, tenantId });
+        const { context, sources } = await rag.buildContext(fusedFull.slice(0, 6000), { k: 5, maxChars: 6000 });
+        runbookContext = context;
+        if (context) console.log(`[Analysis] Runbook grounding: ${sources.length} doc chunk(s) retrieved.`);
+    } catch (err) {
+        console.error("[Analysis] Runbook grounding failed:", err.message);
+    }
+
+    // ---- Fast pass: earliest-chronological head in a single call. ----
+    const head = truncated
         ? `${fusedFull.slice(0, MAX_FUSED_CHARS)}\n[... telemetry truncated at ${MAX_FUSED_CHARS} chars — ${lineCount} total lines fused ...]`
         : fusedFull;
 
-const graphContext = await getBestGraphContext(db, fused, tenantId);
-const historicalMemory = formatGraphContextForPrompt(graphContext);
-    const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        generationConfig: { responseMimeType: "application/json" }
+    const fastPrompt = buildRcaPrompt({ telemetry: head, sourceCount, lineCount, historicalMemory, runbookContext });
+    const fastResult = JSON.parse(await callWithRetry(model, fastPrompt));
+
+    const confidence = fastResult?.confidenceMatrix?.overallScore;
+    if (!shouldEscalate({ truncated, confidence })) {
+        return fastResult;
+    }
+
+    // ---- Deep pass: map-reduce over the WHOLE fused timeline. ----
+    console.log(
+        `[Analysis] Fast pass low-confidence (${confidence ?? "n/a"}) on a truncated ${lineCount}-line log — escalating to map-reduce.`
+    );
+    try {
+        return await deepAnalyze(model, {
+            fusedFull,
+            sourceCount,
+            lineCount,
+            historicalMemory,
+            runbookContext,
+            fastResult,
+        });
+    } catch (err) {
+        // Never let the deep path lose the answer we already have.
+        console.error("[Analysis] Deep pass failed, falling back to fast result:", err.message);
+        return fastResult;
+    }
+}
+
+async function deepAnalyze(model, { fusedFull, sourceCount, lineCount, historicalMemory, runbookContext }) {
+    const chunks = chunkText(fusedFull, CHUNK_CHARS).slice(0, MAX_CHUNKS);
+
+    // MAP: extract compact structured findings from each chunk in parallel.
+    const digests = await mapWithConcurrency(chunks, MAP_CONCURRENCY, async (chunk, i) => {
+        const prompt = buildMapPrompt(chunk, i, chunks.length);
+        try {
+            return await callWithRetry(model, prompt);
+        } catch (err) {
+            console.error(`[Analysis] Chunk ${i + 1}/${chunks.length} map failed:`, err.message);
+            return null;
+        }
     });
 
-    const prompt = `
+    const evidenceDigest = digests
+        .map((d, i) => (d ? `--- SEGMENT ${i + 1}/${chunks.length} FINDINGS ---\n${d}` : null))
+        .filter(Boolean)
+        .join("\n\n");
+
+    // REDUCE: synthesize a final RCA from the per-segment findings. We feed the
+    // digests as pre-analyzed evidence rather than raw logs, so the whole file's
+    // signal reaches the final call within one context window.
+    const reducePrompt = buildRcaPrompt({
+        telemetry: evidenceDigest,
+        sourceCount,
+        lineCount,
+        historicalMemory,
+        runbookContext,
+        telemetryLabel: "PRE-ANALYZED EVIDENCE DIGEST (map-reduced from the full log)",
+    });
+    return JSON.parse(await callWithRetry(model, reducePrompt));
+}
+
+function buildMapPrompt(chunk, index, total) {
+    return `
+You are a log-analysis worker examining segment ${index + 1} of ${total} from a larger system telemetry stream.
+Extract ONLY the diagnostically significant facts from THIS segment. Do not speculate about segments you cannot see.
+
+Return EXACTLY this JSON (no markdown fences):
+{
+  "keyEvents": [ { "time": "timestamp or null", "event": "what happened", "component": "service/db/layer" } ],
+  "errors": [ "exact copy-pasted error/exception/stack-trace lines" ],
+  "componentsSeen": [ "distinct component names appearing in this segment" ],
+  "anomalies": [ "anything unusual: latency spikes, retries, restarts, saturation" ]
+}
+
+SEGMENT TELEMETRY:
+${chunk}
+`;
+}
+
+function buildRcaPrompt({ telemetry, sourceCount, lineCount, historicalMemory, runbookContext, telemetryLabel }) {
+    return `
 You are the Forge Master Diagnostic Agent, an elite AI system designed to analyze highly complex, distributed system failures. You operate with the rigor of a Principal Systems Architect.
 
 Your mandate is to ingest system telemetry, perform a deterministic Root Cause Analysis (RCA), and output structured intelligence. You must absolutely NOT hallucinate or guess.
 
-${historicalMemory ? `${historicalMemory}\n\nIMPORTANT: The above is REAL historical data from previous incidents in this exact system. You MUST acknowledge whether the current incident matches this known pattern in your "historicalCorrelation" field below.\n` : ""}
-TELEMETRY METADATA:
+${historicalMemory ? `${historicalMemory}\n\nIMPORTANT: The above is REAL historical data from previous incidents in this exact system. You MUST acknowledge whether the current incident matches this known pattern in your "historicalCorrelation" field below.\n` : ""}${runbookContext ? `AUTHORITATIVE RUNBOOK CONTEXT — the following are excerpts retrieved from THIS organization's own runbooks and architecture documentation, each tagged with a [[n]] citation:\n\n${runbookContext}\n\nGROUNDING RULES (critical, to prevent hallucination):\n- When you propose "mitigationSteps", you MUST prefer procedures documented above and cite the source with its [[n]] tag inside the "action" text.\n- Do NOT invent CLI commands, config paths, or procedures that contradict the runbook context.\n- If NONE of the provided runbook context applies to this incident, explicitly say so in the step's "action" and fall back to clearly-labelled general best practice.\n\n` : ""}TELEMETRY METADATA:
 - Sources fused: ${sourceCount} log file(s)
 - Total lines analyzed: ${lineCount}
 - Format: [source-file] timestamp | log line
@@ -107,12 +246,10 @@ Return EXACTLY this JSON structure. Do not include markdown formatting like \`\`
   }
 }
 
-FUSED TELEMETRY TIMELINE (${sourceCount} source(s), ${lineCount} lines):
-${fused}
+${telemetryLabel ?? `FUSED TELEMETRY TIMELINE (${sourceCount} source(s), ${lineCount} lines)`}:
+${telemetry}
     `;
-
- const responseText = await callWithRetry(model, prompt);
-return JSON.parse(responseText);}
+}
 
 const GEMINI_TIMEOUT_MS = 60_000;
 

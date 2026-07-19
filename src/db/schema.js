@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, boolean, unique, index, uniqueIndex, customType } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, integer, boolean, unique, index, uniqueIndex, customType, vector } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // raw bytes at rest — TFHE key/ciphertext material is incompressible, so the
 // one real size lever is dropping the 33% base64-in-text overhead
@@ -113,6 +114,85 @@ export const evidence = pgTable("evidence", {
     sourceFile: text("source_file"),
     createdAt: timestamp("created_at").defaultNow()
 });
+
+// --- Interactive incident workspace: durable transcript of the conversational
+// RAG chat about an incident. role = "user" | "assistant"; author identifies the
+// engineer for user turns; sources holds the assistant turn's grounding refs. ---
+export const incidentChatMessages = pgTable("incident_chat_messages", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    incidentId: uuid("incident_id").notNull(),
+    tenantId: text("tenant_id").default("default").notNull(),
+    role: text("role").notNull(),
+    author: text("author"),
+    content: text("content").notNull(),
+    sources: jsonb("sources"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow()
+}, (t) => [
+    index("incident_chat_incident_idx").on(t.incidentId, t.createdAt)
+]);
+
+// --- RAG knowledge base: generalized, collection-scoped document corpus for
+// retrieval-augmented grounding (first use: team runbooks + architecture docs
+// to ground RCA/mitigation). Reusable across features via the `collection`
+// namespace. See src/rag/. Embeddings: gemini-embedding-001 @ 768 dims. ---
+export const ragDocuments = pgTable("rag_documents", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").default("default").notNull(),
+    collection: text("collection").default("default").notNull(),
+    title: text("title"),
+    sourceUri: text("source_uri"),
+    content: text("content"),
+    contentHash: text("content_hash"),
+    status: text("status").default("pending").notNull(), // pending|processing|ready|failed
+    chunkCount: integer("chunk_count").default(0).notNull(),
+    version: integer("version").default(1).notNull(),     // bumped on each content change
+    error: text("error"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow()
+}, (t) => [
+    index("rag_documents_tenant_collection_idx").on(t.tenantId, t.collection),
+    index("rag_documents_hash_idx").on(t.tenantId, t.collection, t.contentHash),
+    uniqueIndex("rag_documents_source_uri_idx").on(t.tenantId, t.collection, t.sourceUri).where(sql`source_uri IS NOT NULL`)
+]);
+
+export const ragChunks = pgTable("rag_chunks", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    documentId: uuid("document_id").notNull().references(() => ragDocuments.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id").default("default").notNull(),
+    collection: text("collection").default("default").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    content: text("content").notNull(),
+    tokenEstimate: integer("token_estimate"),
+    embedding: vector("embedding", { dimensions: 768 }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow()
+}, (t) => [
+    uniqueIndex("rag_chunks_doc_index_idx").on(t.documentId, t.chunkIndex),
+    index("rag_chunks_tenant_collection_idx").on(t.tenantId, t.collection),
+    index("rag_chunks_vec_idx").using("hnsw", t.embedding.op("vector_cosine_ops"))
+]);
+
+// Semantic incident memory: an embedding of each analyzed incident's telemetry,
+// used for vector-similarity recall of past incidents ("this looks like that
+// outage 3 weeks ago") — more robust than the exact component-name match the
+// causal graph does. One row per incident (unique incident_id). See
+// analysis/incidentMemory.js. Embeddings: gemini-embedding-001 @ 768 dims.
+export const incidentEmbeddings = pgTable("incident_embeddings", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").default("default").notNull(),
+    incidentId: uuid("incident_id").notNull(),
+    reportId: uuid("report_id"),
+    summary: text("summary"),
+    primaryComponent: text("primary_component"),
+    severity: text("severity"),
+    embedding: vector("embedding", { dimensions: 768 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow()
+}, (t) => [
+    index("incident_embeddings_tenant_idx").on(t.tenantId),
+    uniqueIndex("incident_embeddings_incident_idx").on(t.incidentId),
+    index("incident_embeddings_vec_idx").using("hnsw", t.embedding.op("vector_cosine_ops"))
+]);
 
 export const reports = pgTable("reports", {
     id: uuid("id").defaultRandom().primaryKey(),

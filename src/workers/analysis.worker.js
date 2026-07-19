@@ -11,6 +11,8 @@ import { scoreRunbook } from "../modules/analysis/runbookScorer.js";
 import { decideEscalation } from "../modules/analysis/escalationRouter.js";
 import { dispatchToSlack } from "../modules/notifications/slackDispatcher.js";
 import { publishEvent } from "../events/publisher.js";
+import { getIncidentEmbeddingInput, storeIncidentEmbedding } from "../modules/analysis/incidentMemory.js";
+import { embedText } from "../lib/embeddings.js";
 
 const connection = createRedisConnection();
 export const worker = new Worker(
@@ -45,6 +47,26 @@ export const worker = new Worker(
         // 4. Graph updated
         await writeToGraph(db, incidentId, aiAnalysis, tenantId);
         await publishEvent(incidentId, { type: "graph-updated", reportId });
+
+        // 4b. Semantic memory: embed this incident so future incidents can
+        // recall it by vector similarity. Best-effort — never fail the job.
+        try {
+            const embedInput = await getIncidentEmbeddingInput(db, incidentId);
+            const embedding = await embedText(embedInput, "RETRIEVAL_DOCUMENT");
+            const fp = aiAnalysis?.incidentFingerprint ?? {};
+            await storeIncidentEmbedding(db, {
+                tenantId,
+                incidentId,
+                reportId,
+                summary: fp.executiveSummary ?? aiAnalysis?.rootCauseAnalysis?.definitiveRootCause ?? null,
+                primaryComponent: fp.primaryFailingComponent ?? null,
+                severity: fp.severityLevel ?? null,
+                embedding,
+            });
+            if (embedding) console.log(`[Memory] Stored incident embedding — ${reportId}`);
+        } catch (err) {
+            console.error("[Memory] Embedding store failed silently:", err.message);
+        }
 
         // 5. Scoring
         try {
