@@ -3,6 +3,9 @@ import { evidence, incidents } from "../../db/schema.js";
 import { analysisQueue } from "../../queues/analysis.queue.js";
 import { createPendingReport } from "../reports/reports.repository.js";
 import { reduceLogStream } from "./streamReduce.js";
+import { createRedactor } from "../../lib/redaction.js";
+import { redactionEnabled } from "../../lib/redactionCrypto.js";
+import { persistRedactions, loadRedactionSeed } from "./redactionStore.js";
 
 export async function uploadEvidenceHandler(req, reply) {
     try {
@@ -24,6 +27,15 @@ export async function uploadEvidenceHandler(req, reply) {
         const files = req.files();
         const insertedEvidence = [];
 
+        // Redaction is env-gated (REDACTION_KEY). When on, secrets/PII are
+        // tokenized BEFORE anything is stored or later sent to the LLM. One
+        // redactor per request, seeded from this incident's existing map, gives
+        // stable placeholders across files and across re-uploads.
+        const redacting = redactionEnabled();
+        const redactor = redacting
+            ? createRedactor(await loadRedactionSeed(req.server.db, { tenantId, incidentId }))
+            : null;
+
         for await (const part of files) {
             // Stream + reduce the upload instead of buffering it whole: gzip is
             // decompressed on the fly, binary is rejected, and we keep only a
@@ -33,17 +45,20 @@ export async function uploadEvidenceHandler(req, reply) {
             const { reducedText, totalLines, totalBytes, retainedLines, severeLines, truncated } =
                 await reduceLogStream(part.file, { filename: part.filename });
 
+            // Tokenize secrets/PII out of the text we persist and analyze.
+            const storedText = redactor ? redactor.redact(reducedText) : reducedText;
+
             req.log.info(
                 `[Evidence] ${part.filename}: ${(totalBytes / 1048576).toFixed(1)}MB, ` +
                 `${totalLines} lines -> ${retainedLines} retained (${severeLines} severity-flagged)` +
-                (truncated ? " [reduced]" : "")
+                (truncated ? " [reduced]" : "") + (redacting ? " [redacted]" : "")
             );
 
             const result = await req.server.db
                 .insert(evidence)
                 .values({
                     incidentId,
-                    extractedData: reducedText,
+                    extractedData: storedText,
                     sourceFile: part.filename
                 })
                 .returning();
@@ -53,6 +68,12 @@ export async function uploadEvidenceHandler(req, reply) {
 
         if (insertedEvidence.length === 0) {
             return reply.status(400).send({ error: "No files provided" });
+        }
+
+        // Persist the encrypted reverse-map so authorized viewers can re-hydrate.
+        if (redactor && redactor.mappings.length) {
+            await persistRedactions(req.server.db, { tenantId, incidentId, mappings: redactor.mappings });
+            req.log.info(`[Evidence] redacted ${redactor.mappings.length} sensitive value(s) for incident ${incidentId}`);
         }
 
         const report = await createPendingReport(req.server.db, incidentId);

@@ -115,6 +115,24 @@ export const evidence = pgTable("evidence", {
     createdAt: timestamp("created_at").defaultNow()
 });
 
+// --- Redaction reverse-map: placeholder → ENCRYPTED original secret/PII. The
+// redacted evidence stored elsewhere holds only «TYPE_N» placeholders; the
+// originals are AES-256-GCM encrypted here with a key derived from an env secret
+// (never in the DB), so a DB compromise alone can't reveal them. See
+// lib/redaction.js + lib/redactionCrypto.js. ---
+export const evidenceRedactions = pgTable("evidence_redactions", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    incidentId: uuid("incident_id").notNull(),
+    placeholder: text("placeholder").notNull(),
+    valueType: text("value_type"),
+    valueCiphertext: text("value_ciphertext").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow()
+}, (t) => [
+    uniqueIndex("evidence_redactions_incident_ph_idx").on(t.incidentId, t.placeholder),
+    index("evidence_redactions_incident_idx").on(t.incidentId, t.tenantId)
+]);
+
 // --- Interactive incident workspace: durable transcript of the conversational
 // RAG chat about an incident. role = "user" | "assistant"; author identifies the
 // engineer for user turns; sources holds the assistant turn's grounding refs. ---
