@@ -13,11 +13,13 @@ import { graphRoutes } from "./modules/graph/graph.routes.js";
 
 import encryptedEvidenceRoutes from "./modules/encryptedEvidence/encryptedEvidence.routes.js";
 import realtimeRoutes from "./modules/realtime/realtime.routes.js";
+import incidentChatRoutes from "./modules/incidentChat/chat.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import oauthRoutes from "./modules/auth/oauth.routes.js";
 import orgRoutes from "./modules/org/org.routes.js";
 import authPlugin from "./plugins/auth.js";
 import { runbookRoutes } from "./modules/runbooks/runbook.routes.js";
+import { ragRoutes } from "./modules/rag/rag.routes.js";
 import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
 import helmet from "@fastify/helmet";
@@ -49,10 +51,12 @@ export function buildApp() {
     });
 
     app.register(multipart, {
-        // Evidence files are buffered whole into memory and stored inline in
-        // Postgres — cap them so one upload can't OOM the process or blow the
-        // LLM context downstream.
-        limits: { fileSize: 5 * 1024 * 1024, files: 10 }
+        // Evidence uploads are streamed and reduced to a bounded slice on the
+        // fly (see incidents/streamReduce.js) — memory and stored bytes are
+        // capped per file regardless of upload size, so we can accept the large
+        // raw logs engineers actually have. The ceiling here is just a sanity
+        // guard against a runaway/malicious upload, not the LLM/storage cap.
+        limits: { fileSize: 300 * 1024 * 1024, files: 10 }
     });
 
     // ---- auth infrastructure (must register before routes) ----
@@ -66,7 +70,9 @@ export function buildApp() {
     });
 
     app.register(dbPlugin);
-    app.register(websocket);
+    // Cap inbound WS frames — chat "ask" messages are tiny; anything larger is
+    // abuse. Prevents a giant frame from ballooning memory before JSON.parse.
+    app.register(websocket, { options: { maxPayload: 64 * 1024 } });
 
     // ---- authenticate + authorize decorators (DB-backed, RBAC) ----
     app.register(authPlugin);
@@ -81,7 +87,9 @@ export function buildApp() {
     app.register(reportRoutes, { prefix: "/reports" });
     app.register(graphRoutes);
     app.register(realtimeRoutes);
+    app.register(incidentChatRoutes);
     app.register(runbookRoutes);
+    app.register(ragRoutes);
 
     app.register(swagger, {
         openapi: {

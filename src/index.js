@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 5000;
 let app;
 let analysisWorker;
 let fheEvidenceWorker;
+let ragWorker;
 let shuttingDown = false;
 
 async function start() {
@@ -28,6 +29,10 @@ async function start() {
         const fheEvidenceWorkerModule = await import("./workers/fheEvidence.worker.js");
         fheEvidenceWorker = fheEvidenceWorkerModule.worker;
         console.log("[Worker] FHE evidence worker started in-process");
+
+        const ragWorkerModule = await import("./workers/rag.worker.js");
+        ragWorker = ragWorkerModule.worker;
+        console.log("[Worker] RAG ingestion worker started in-process");
     } catch (err) {
         app.log.error(err);
         process.exit(1);
@@ -52,6 +57,7 @@ async function shutdown(signal) {
         await Promise.all([
             analysisWorker?.close(),
             fheEvidenceWorker?.close(),
+            ragWorker?.close(),
         ]);
         await app?.close();
 
