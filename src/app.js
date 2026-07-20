@@ -6,6 +6,7 @@ import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
 import dbPlugin from "./plugins/db.js";
 import { healthRoute } from "./routes/health.js";
+import { factsRoute } from "./routes/facts.js";
 import incidentRoutes from "./modules/incidents/incident.routes.js";
 import analysisRoutes from "./modules/analysis/analysis.routes.js";
 import reportRoutes from "./modules/reports/report.routes.js";
@@ -102,6 +103,7 @@ export function buildApp() {
 
     app.register(encryptedEvidenceRoutes, { prefix: "/incidents" });
     app.register(healthRoute);
+    app.register(factsRoute);
     app.register(authRoutes, { prefix: "/auth" });
     app.register(oauthRoutes);
     app.register(orgRoutes, { prefix: "/org" });
