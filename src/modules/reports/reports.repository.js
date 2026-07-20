@@ -53,8 +53,9 @@ const fenced = (db, reportId, token, values) => {
         .returning().then((r) => r[0]);
 };
 
-export async function updateReportStatus(db, reportId, status, aiPayload = null, token = null) {
+export async function updateReportStatus(db, reportId, status, aiPayload = null, token = null, failureReason = null) {
     const updateData = { status };
+    if (status === "failed") updateData.failureReason = failureReason;
     if (aiPayload) updateData.aiPayload = aiPayload;
     // Stamped from the live provider, not a constant — see llm.js currentModel().
     if (status === "completed") updateData.modelUsed = currentModel();
@@ -75,4 +76,8 @@ export async function saveHypotheses(db, reportId, hypotheses, token = null) {
 
 export async function saveConsensus(db, reportId, consensus, token = null) {
     return fenced(db, reportId, token, { consensus });
+}
+
+export async function saveInvestigation(db, reportId, investigation, token = null) {
+    return fenced(db, reportId, token, { investigation });
 }

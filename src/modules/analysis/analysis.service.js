@@ -1,4 +1,4 @@
-import { generateJson } from "../../lib/llm.js";
+import { generateJson, maxPromptChars } from "../../lib/llm.js";
 import { getEvidenceForIncident } from "../incidents/evidence.repository.js";
 import { fuseLogs } from "./logFusion.js";
 import { getBestGraphContext, formatGraphContextForPrompt } from "./graphReader.js";
@@ -10,14 +10,22 @@ import { RagPipeline } from "../../rag/pipeline.js";
 // ground mitigation steps in real procedures instead of the model's guesses.
 const RUNBOOK_COLLECTION = "runbooks";
 
-// Fast pass: how much fused telemetry we send in a single call. Beyond this we
-// either truncate (confident answer) or escalate to the deep map-reduce pass.
-const MAX_FUSED_CHARS = 150_000;
-// Deep pass: per-chunk size for the map step. Comfortably inside the model's
-// context so each chunk gets full attention.
-const CHUNK_CHARS = 120_000;
-// Cap the deep fan-out so one incident can't launch unbounded model calls.
-const MAX_CHUNKS = 12;
+// How much fused telemetry goes into one call.
+//
+// Derived from the provider, NOT a constant. This was 150_000 — sized for
+// Gemini's million-token context — and after the seam was pointed at Groq
+// (12k tokens per MINUTE) every large-log prompt became a guaranteed 413. Two
+// real uploads failed that way with no reason recorded. See llm.js.
+//
+// 55% of the ceiling: the rest of the prompt is scaffold, historical memory,
+// runbook context and the model's own response, all of which count.
+const telemetryBudget = (tier = "primary") => Math.floor(maxPromptChars(tier) * 0.55);
+// Deep pass: same ceiling per chunk, because each chunk is its own call.
+const chunkBudget = () => telemetryBudget("primary");
+// Cap the deep fan-out. On a metered tier this is a DAILY token budget question,
+// not just a concurrency one: 12 chunks x 120k chars was ~360k tokens against a
+// 100k/day limit, i.e. never completable.
+const MAX_CHUNKS = Number(process.env.ANALYSIS_MAX_CHUNKS ?? 5);
 const MAP_CONCURRENCY = 4;
 
 /**
@@ -41,14 +49,15 @@ export async function buildAnalysisContext(db, incidentId, tenantId = "default")
     if (!records.length) return null;
 
     const { fused: fusedFull, lineCount, sourceCount } = fuseLogs(records);
-    const truncated = fusedFull.length > MAX_FUSED_CHARS;
+    const maxFused = telemetryBudget();
+    const truncated = fusedFull.length > maxFused;
 
     // Historical memory comes from two complementary sources, merged into one
     // prompt block: the causal graph (exact component-name matches + blast
     // radius) and pgvector semantic recall (incidents that *look like* this one
     // even when the components are named differently). Both are best-effort —
     // a failure in either must not block the analysis.
-    const graphContext = await getBestGraphContext(db, fusedFull.slice(0, MAX_FUSED_CHARS), tenantId);
+    const graphContext = await getBestGraphContext(db, fusedFull.slice(0, maxFused), tenantId);
     const graphMemory = formatGraphContextForPrompt(graphContext);
 
     let semanticMemory = "";
@@ -56,7 +65,7 @@ export async function buildAnalysisContext(db, incidentId, tenantId = "default")
         const similar = await recallSimilarIncidents(db, {
             incidentId,
             tenantId,
-            telemetry: fusedFull.slice(0, MAX_FUSED_CHARS),
+            telemetry: fusedFull.slice(0, maxFused),
         });
         if (similar.length) {
             semanticMemory = formatSimilarIncidentsForPrompt(similar);
@@ -82,7 +91,7 @@ export async function buildAnalysisContext(db, incidentId, tenantId = "default")
     }
 
     const head = truncated
-        ? `${fusedFull.slice(0, MAX_FUSED_CHARS)}\n[... telemetry truncated at ${MAX_FUSED_CHARS} chars — ${lineCount} total lines fused ...]`
+        ? `${fusedFull.slice(0, maxFused)}\n[... telemetry truncated at ${maxFused} chars — ${lineCount} total lines fused ...]`
         : fusedFull;
 
     return { fusedFull, head, truncated, lineCount, sourceCount, historicalMemory, runbookContext };
@@ -128,7 +137,7 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default", preb
 }
 
 async function deepAnalyze({ fusedFull, sourceCount, lineCount, historicalMemory, runbookContext }) {
-    const chunks = chunkText(fusedFull, CHUNK_CHARS).slice(0, MAX_CHUNKS);
+    const chunks = chunkText(fusedFull, chunkBudget()).slice(0, MAX_CHUNKS);
 
     // MAP: extract compact structured findings from each chunk in parallel.
     const digests = await mapWithConcurrency(chunks, MAP_CONCURRENCY, async (chunk, i) => {

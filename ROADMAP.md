@@ -185,22 +185,27 @@ structured JSON (`rootCauseAnalysis`, `incidentFingerprint`, `timeline`). What i
 missing is that it is a *soloist, not a council member* — nothing else produces a
 competing hypothesis for it to be weighed against.
 
-### MCTS / UCT investigation — Deferred
+### MCTS / UCT investigation — BUILT
 
-Treat investigation as an MDP: state = services visited + evidence gathered,
-action = inspect/pull/expand, reward = information gain
-`r(s,a) = H(R|e_s) − H(R|e_s ∪ {outcome(a)})`, explored with
-`UCT = Q + c·√(ln N(s) / N(s,a))` under progressive widening.
+`lib/mcts.js` (generic UCT) + `modules/analysis/investigator.js` (the domain).
+State = belief over the shared hypothesis set + which segments have been read,
+action = read a telemetry segment, reward =
+`H(R|e_s) − H(R|e_s ∪ {outcome(a)})` measured as normalized-entropy collapse.
 
-**Why not:** the reward is the blocker, not the search. Computing information
-gain over the root-cause variable `R` requires a probability distribution over
-root causes that updates as evidence arrives. Forge does not have one — the LLM
-returns a single narrative hypothesis, not a posterior. MCTS without a reward
-function is a random walk that spends real money on tool calls.
+The unblocking change was the shared hypothesis set below: once agents emit
+distributions, the reward became computable, exactly as predicted.
 
-**Build when:** agents emit distributions over a shared hypothesis set (see
-below). That same change is what makes both MCTS *and* consensus possible, which
-is why it is the highest-leverage unbuilt item in the system.
+**What shipped narrower than the sketch:** the action space is retrieval over
+evidence Forge already holds, not `inspect/pull/expand` against live
+infrastructure — Forge has no production access. No progressive widening; the
+action set is small and finite (≤12 segments) so it does not need it.
+
+**It is gated on truncated evidence.** When the fused telemetry fits in one
+context window the search never runs, because one prompt beats any search over
+text that prompt could already see. Its real justification is the deep path:
+`deepAnalyze` maps over up to 12 × 120k-char chunks blindly, ~3.6x the entire
+Groq free-tier daily token budget. Choosing 4 segments by information gain is
+what makes that path affordable at all.
 
 ### Shared discrete hypothesis set — Deferred (the keystone)
 

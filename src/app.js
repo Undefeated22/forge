@@ -79,6 +79,22 @@ export function buildApp() {
     // ---- authenticate + authorize decorators (DB-backed, RBAC) ----
     app.register(authPlugin);
 
+    // Swagger MUST register before the route plugins. Fastify only shows a
+    // plugin the routes added AFTER it, so registering these at the bottom (as
+    // they were) produced a /docs page documenting exactly zero paths.
+    app.register(swagger, {
+        openapi: {
+            info: {
+                title: "Forge API",
+                description: "Incident investigation backend",
+                version: "0.0.0"
+            }
+        }
+    });
+    app.register(swaggerUI, {
+        routePrefix: "/docs"
+    });
+
     app.register(encryptedEvidenceRoutes, { prefix: "/incidents" });
     app.register(healthRoute);
     app.register(authRoutes, { prefix: "/auth" });
@@ -94,19 +110,6 @@ export function buildApp() {
     app.register(ragRoutes);
     app.register(ingestRoutes);
     app.register(signalRoutes);
-
-    app.register(swagger, {
-        openapi: {
-            info: {
-                title: "Forge API",
-                description: "Incident investigation backend",
-                version: "0.0.0"
-            }
-        }
-    });
-    app.register(swaggerUI, {
-        routePrefix: "/docs"
-    });
 
     return app;
 }

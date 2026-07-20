@@ -1,4 +1,5 @@
 import { PERMISSIONS } from "../auth/rbac.js";
+import { uuidParams } from "../../lib/uuidParams.js";
 import {
     listMembersHandler, inviteMemberHandler, acceptInvitationHandler,
     updateMemberRoleHandler, removeMemberHandler,
@@ -35,10 +36,12 @@ export default async function orgRoutes(fastify) {
     fastify.post("/switch", { preHandler: [fastify.authenticate] }, switchOrgHandler);
 
     fastify.patch("/members/:userId", {
+        schema: { params: uuidParams("userId") },
         preHandler: fastify.requirePermission(PERMISSIONS.MEMBERS_MANAGE),
     }, updateMemberRoleHandler);
 
     fastify.delete("/members/:userId", {
+        schema: { params: uuidParams("userId") },
         preHandler: fastify.requirePermission(PERMISSIONS.MEMBERS_MANAGE),
     }, removeMemberHandler);
 }

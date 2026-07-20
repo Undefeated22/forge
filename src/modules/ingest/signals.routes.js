@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { signals } from "../../db/schema.js";
 import { PERMISSIONS } from "../auth/rbac.js";
+import { uuidParams } from "../../lib/uuidParams.js";
 import { COSTS, costOptimalThreshold } from "../../lib/triage.js";
 import { sweepThreshold, evaluateThreshold, reliabilityCurve } from "../../lib/calibration.js";
 
@@ -64,6 +65,7 @@ export default async function signalRoutes(fastify) {
     fastify.post("/signals/:id/label", {
         preHandler: fastify.requirePermission(PERMISSIONS.ANALYSIS_RUN),
         schema: {
+            params: uuidParams("id"),
             body: {
                 type: "object",
                 required: ["label"],
