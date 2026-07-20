@@ -3,7 +3,7 @@ import { getEvidenceForIncident } from "../incidents/evidence.repository.js";
 import { fuseLogs } from "./logFusion.js";
 import { getBestGraphContext, formatGraphContextForPrompt } from "./graphReader.js";
 import { chunkText, shouldEscalate, mapWithConcurrency } from "./chunker.js";
-import { recallSimilarIncidents, formatSimilarIncidentsForPrompt } from "./incidentMemory.js";
+import { recallStructuredIncidents, formatStructuredMemoryForPrompt } from "./hybridContext.js";
 import { RagPipeline } from "../../rag/pipeline.js";
 
 // Collection holding the org's ingested runbooks/architecture docs, used to
@@ -53,26 +53,28 @@ export async function buildAnalysisContext(db, incidentId, tenantId = "default")
     const truncated = fusedFull.length > maxFused;
 
     // Historical memory comes from two complementary sources, merged into one
-    // prompt block: the causal graph (exact component-name matches + blast
-    // radius) and pgvector semantic recall (incidents that *look like* this one
-    // even when the components are named differently). Both are best-effort —
-    // a failure in either must not block the analysis.
+    // prompt block: the causal graph's blast-radius (what THIS component has
+    // caused to fail before) and graph-structured recall of prior incidents —
+    // vector-similar ones AND ones the dependency graph links to, which flat
+    // recall misses when the same failure is worded differently. Both are
+    // best-effort — a failure in either must not block the analysis.
     const graphContext = await getBestGraphContext(db, fusedFull.slice(0, maxFused), tenantId);
     const graphMemory = formatGraphContextForPrompt(graphContext);
 
     let semanticMemory = "";
     try {
-        const similar = await recallSimilarIncidents(db, {
+        const similar = await recallStructuredIncidents(db, {
             incidentId,
             tenantId,
             telemetry: fusedFull.slice(0, maxFused),
         });
         if (similar.length) {
-            semanticMemory = formatSimilarIncidentsForPrompt(similar);
-            console.log(`[Analysis] Semantic memory: ${similar.length} similar past incident(s) recalled.`);
+            semanticMemory = formatStructuredMemoryForPrompt(similar);
+            const linked = similar.filter((r) => r.basis !== "vector").length;
+            console.log(`[Analysis] Structured memory: ${similar.length} past incident(s) recalled (${linked} via causal graph).`);
         }
     } catch (err) {
-        console.error("[Analysis] Semantic memory lookup failed:", err.message);
+        console.error("[Analysis] Structured memory lookup failed:", err.message);
     }
 
     const historicalMemory = [graphMemory, semanticMemory].filter(Boolean).join("\n\n");
