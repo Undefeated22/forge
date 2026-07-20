@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, boolean, unique, index, uniqueIndex, customType, vector } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, integer, bigint, boolean, doublePrecision, unique, index, uniqueIndex, customType, vector } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 // raw bytes at rest — TFHE key/ciphertext material is incompressible, so the
@@ -8,6 +8,13 @@ const bytea = customType({ dataType: () => "bytea" });
 export const organizations = pgTable("organizations", {
     id: uuid("id").defaultRandom().primaryKey(),
     name: text("name").notNull(),
+    // Public, random ingest identifier. It travels in the ingest URL BEFORE any
+    // credential has been checked, so it must not be the org's primary key —
+    // otherwise the endpoint leaks an enumerable list of tenants.
+    // Defaulted in the database so both org-creation paths get one for free.
+    ingestSlug: text("ingest_slug").default(sql`replace(gen_random_uuid()::text, '-', '')`),
+    // Bump to revoke this one tenant's derived ingest key. See lib/ingestAuth.js
+    ingestKeyVersion: integer("ingest_key_version").default(1).notNull(),
     createdAt: timestamp("created_at").defaultNow()
 });
 
@@ -99,13 +106,57 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
 
 export const incidents = pgTable("incidents", {
     id: uuid("id").defaultRandom().primaryKey(),
-    userId: uuid("user_id").notNull(),
+    // nullable: incidents opened by the ingest firehose have no human author
+    userId: uuid("user_id"),
     tenantId: uuid("tenant_id"),  // the organization that owns this incident
     title: text("title").notNull(),
     description: text("description"),
-    status: text("status").default("pending"),
+    // "open" | "resolved". One vocabulary for both manually created and
+    // signal-driven incidents; auto-resolve only ever touches the latter.
+    status: text("status").default("open"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolution: text("resolution"),
+    // Entity-level dedup identity for ingested signals — see lib/triage.js.
+    // A partial unique index on (tenant_id, fingerprint) WHERE status = 'open'
+    // makes find-or-create atomic, so a signal storm collapses to one incident
+    // without an application-level lock. Null for manually created incidents.
+    fingerprint: text("fingerprint"),
+    entity: text("entity"),
+    signalCount: integer("signal_count").default(1).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow(),
     createdAt: timestamp("created_at").defaultNow()
 });
+
+// Every triaged signal, escalated OR suppressed. The suppressed rows are the
+// expensive half to justify and the important half to keep: they are the only
+// record of what the threshold rejected, and therefore the only way to ever
+// measure FPR/TPR and replace the hand-set weights in triage.js with a fit.
+export const signals = pgTable("signals", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: uuid("tenant_id").notNull(),
+    incidentId: uuid("incident_id"),   // null when suppressed
+    source: text("source"),
+    entity: text("entity"),
+    fingerprint: text("fingerprint"),
+    severity: text("severity"),
+    // Score AND the threshold it was judged against: tau moves whenever the
+    // cost ratio changes, and storing both lets you replay every historical
+    // decision under a new tau without re-scoring.
+    score: doublePrecision("score").notNull(),
+    threshold: doublePrecision("threshold").notNull(),
+    escalated: boolean("escalated").notNull(),
+    features: jsonb("features"),
+    excerpt: text("excerpt"),
+    // Ground truth for calibration: 'incident' means this should have been
+    // escalated, 'noise' means it should not have been. Stays NULL for most rows.
+    label: text("label"),
+    labeledAt: timestamp("labeled_at", { withTimezone: true }),
+    labeledBy: uuid("labeled_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow()
+}, (t) => [
+    index("signals_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("signals_fingerprint_idx").on(t.tenantId, t.fingerprint)
+]);
 
 export const evidence = pgTable("evidence", {
     id: uuid("id").defaultRandom().primaryKey(),
@@ -220,6 +271,22 @@ export const reports = pgTable("reports", {
     escalationTier: text("escalation_tier"),
     modelUsed: text("model_used"),
     status: text("status").default("pending").notNull(),
+    // Shared discrete hypothesis set H with a belief p over it, from the
+    // Vanguard. Separate from ai_payload because it has a different lifecycle:
+    // ai_payload is one model's narrative, written once; this is a belief later
+    // agents update and pool. See lib/hypotheses.js.
+    hypotheses: jsonb("hypotheses"),
+    // What the council agreed on, and how far apart it started. Kept separate
+    // from `hypotheses` so the disagreement stays measurable — see 0015.
+    consensus: jsonb("consensus"),
+    // Monotonic fencing token of the last holder to write this row. A write
+    // carrying a lower token is refused — that is what makes an expired-but-
+    // unaware lease holder harmless. See lib/fencedLock.js.
+    // mode "number", NOT "bigint": Drizzle returns a JS BigInt for the latter and
+    // JSON.stringify throws on it, which 500s GET /reports/:incidentId — the
+    // product's main read path. Sequence values are exact integers well below
+    // 2^53, so number loses nothing.
+    fenceToken: bigint("fence_token", { mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at").defaultNow()
 });
 

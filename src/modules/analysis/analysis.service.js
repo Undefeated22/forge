@@ -25,9 +25,19 @@ const MAP_CONCURRENCY = 4;
  * only saw a truncated view of a large log AND came back unsure, it escalates to
  * a map-reduce pass over the full fused timeline before returning.
  */
-export async function analyzeEvidence(db, incidentId, tenantId = "default") {
+/**
+ * Everything the analysis needs, gathered once.
+ *
+ * Extracted so the Vanguard (hypothesis generation) and the RCA pass can share a
+ * single retrieval pass. Building it twice would mean two graph queries, two
+ * pgvector recalls and two RAG embeddings per incident — and the Vanguard must
+ * see the same evidence the RCA does, or the hypotheses it proposes are about a
+ * different incident than the one being analyzed.
+ *
+ * @returns null when the incident has no evidence at all.
+ */
+export async function buildAnalysisContext(db, incidentId, tenantId = "default") {
     const records = await getEvidenceForIncident(db, incidentId, tenantId);
-
     if (!records.length) return null;
 
     const { fused: fusedFull, lineCount, sourceCount } = fuseLogs(records);
@@ -71,11 +81,24 @@ export async function analyzeEvidence(db, incidentId, tenantId = "default") {
         console.error("[Analysis] Runbook grounding failed:", err.message);
     }
 
-    // ---- Fast pass: earliest-chronological head in a single call. ----
     const head = truncated
         ? `${fusedFull.slice(0, MAX_FUSED_CHARS)}\n[... telemetry truncated at ${MAX_FUSED_CHARS} chars — ${lineCount} total lines fused ...]`
         : fusedFull;
 
+    return { fusedFull, head, truncated, lineCount, sourceCount, historicalMemory, runbookContext };
+}
+
+/**
+ * @param {object} [prebuilt] context from buildAnalysisContext(). Pass it when
+ *        the caller already built one (the worker does, for the Vanguard) so the
+ *        retrieval work is not repeated.
+ */
+export async function analyzeEvidence(db, incidentId, tenantId = "default", prebuilt = null) {
+    const ctx = prebuilt ?? await buildAnalysisContext(db, incidentId, tenantId);
+    if (!ctx) return null;
+    const { fusedFull, head, truncated, lineCount, sourceCount, historicalMemory, runbookContext } = ctx;
+
+    // ---- Fast pass: earliest-chronological head in a single call. ----
     const fastPrompt = buildRcaPrompt({ telemetry: head, sourceCount, lineCount, historicalMemory, runbookContext });
     const fastResult = JSON.parse(await generateJson(fastPrompt));
 

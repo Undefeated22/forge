@@ -39,6 +39,10 @@ export async function listIncidentsHandler(req, reply) {
             const ai = report?.aiPayload;
             return {
                 ...inc,
+                // Signal-driven incidents look different from hand-created ones
+                // and the list has to say so: `origin` tells a UI whether the
+                // entity/signalCount columns mean anything for this row.
+                origin: inc.fingerprint ? "signal" : "manual",
                 reportStatus: report?.status ?? "no-report",
                 severity: ai?.incidentFingerprint?.severityLevel ?? null,
                 primaryComponent: ai?.incidentFingerprint?.primaryFailingComponent ?? null,

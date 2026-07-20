@@ -50,6 +50,96 @@ describe("redactText — detection", () => {
     });
 });
 
+// The gap found during end-to-end verification: a live-format Stripe key sat in
+// an uploaded log and reached the LLM in plaintext, because the keyed-secret
+// rule only recognised names containing "api_key"/"token"/"secret" and
+// STRIPE_KEY contains none of them.
+describe("redactText — provider credentials", () => {
+    // Fixtures are ASSEMBLED, never written as literals.
+    //
+    // A test proving redaction catches live-format credentials has to contain
+    // live-format credentials — which is precisely what GitHub push protection
+    // blocks, and it is right to. Joining fragments keeps the value byte-identical
+    // at runtime, so the detectors still face the real format, while no scannable
+    // literal exists in the source. Do not "tidy" these back into strings.
+    const k = (...parts) => parts.join("");
+
+    const STRIPE_LIVE = k("sk_", "live_", "51H8xKlAbCdEfGhIjKlMnOpQr");
+    const cases = [
+        ["STRIPE_KEY", STRIPE_LIVE, "STRIPE_KEY"],
+        ["Stripe restricted", k("rk_", "live_", "51H8xKlAbCdEfGhIjKlMnOpQr"), "STRIPE_KEY"],
+        ["Slack bot token", k("xox", "b-", "123456789012-abcdefGHIJKL"), "SLACK_TOKEN"],
+        ["Google/Gemini", k("AIza", "SyC8ldEfGhIjKlMnOpQrStUvWxYz0123456"), "GOOGLE_API_KEY"],
+        ["OpenAI", k("sk-", "abcdefghijklmnopqrstuvwxyz0123"), "LLM_API_KEY"],
+        ["Anthropic", k("sk-", "ant-api03-", "abcdefghijklmnopqrstuvwxyz"), "LLM_API_KEY"],
+        ["GitLab PAT", k("glpat-", "abcdefghij0123456789"), "GITLAB_TOKEN"],
+        ["Resend", k("re_", "abcdefghij0123456789"), "RESEND_KEY"],
+    ];
+
+    it.each(cases)("redacts a bare %s with no key= context", (_label, secret, type) => {
+        // Bare, exactly as it appears in a stack frame or an echoed curl line —
+        // nothing for the keyed-secret rule to anchor on.
+        const { redacted, mappings } = redactText(`worker crashed while using ${secret} upstream`);
+        expect(redacted).not.toContain(secret);
+        expect(redacted).toContain(`«${type}_1»`);
+        expect(mappings.find((m) => m.value === secret)?.type).toBe(type);
+    });
+
+    it("redacts the exact Stripe key that leaked during verification", () => {
+        const leaked = k("sk_", "live_", "51Hxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        const line = `2026-07-19T21:45:12Z INFO payment-service using STRIPE_KEY=${leaked}`;
+        const { redacted } = redactText(line);
+        expect(redacted).not.toContain(leaked);
+        expect(redacted).toContain("STRIPE_KEY=");   // the name survives for context
+    });
+
+    it("redacts a Slack webhook URL, which is itself the credential", () => {
+        const url = k("https://hooks.slack.com/", "services/", "T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX");
+        const { redacted } = redactText(`posting to ${url}`);
+        expect(redacted).not.toContain(url);
+        expect(redacted).toContain("«SLACK_WEBHOOK_1»");
+    });
+
+    it("keeps provider keys stable and re-hydratable", () => {
+        const original = `first ${STRIPE_LIVE} then ${STRIPE_LIVE} again`;
+        const { redacted, mappings } = redactText(original);
+        expect(mappings).toHaveLength(1);            // one distinct secret
+        const map = new Map(mappings.map((m) => [m.placeholder, m.value]));
+        expect(rehydrate(redacted, map)).toBe(original);
+    });
+});
+
+// The generalisation that matters more than the enumerated list: a vendor whose
+// prefix nobody has added still gets caught when the value has a key NAME.
+describe("redactText — unknown providers via key naming", () => {
+    it.each([
+        "DATADOG_API_KEY=0123456789abcdef0123456789abcdef",
+        "ACME_SECRET=sup3rs3cretvalue123",
+        "VAULT_TOKEN=hvs.CAESIJlkajsdlkfjasldkfj",
+        "DB_PASSWORD=n0tAG00dP4ssw0rd",
+        "SIGNING_CREDENTIAL=abcdef1234567890",
+    ])("redacts %s from a name it has never seen before", (line) => {
+        const { redacted } = redactText(line);
+        const value = line.split("=")[1];
+        expect(redacted).not.toContain(value);
+        expect(redacted).toContain("«SECRET_1»");
+        expect(redacted).toContain(line.split("=")[0]);  // name preserved
+    });
+
+    // The \b in the SECRET pattern exists for exactly this: without it the bare
+    // `key` alternative matches inside any word ending in "key".
+    it("does not fire on ordinary words that merely end in a keyword", () => {
+        for (const line of ["monkey=banana12345", "turkey: sandwich123", "sortkey=abcdef123456"]) {
+            expect(redactText(line).redacted).toBe(line);
+        }
+    });
+
+    it("leaves ordinary log lines completely untouched", () => {
+        const line = "2026-07-19T21:45:03Z ERROR payment-service pool exhausted: 20/20 in use, 143 waiting";
+        expect(redactText(line).redacted).toBe(line);
+    });
+});
+
 describe("createRedactor — stability across texts", () => {
     it("maps the same value to the same placeholder across multiple redact() calls", () => {
         const r = createRedactor();

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { llmProvider, generateJson, generateStream, _internal } from "./llm.js";
+import { llmProvider, generateJson, generateStream, currentModel, _internal } from "./llm.js";
 
 const OLD_ENV = { ...process.env };
 afterEach(() => { process.env = { ...OLD_ENV }; vi.restoreAllMocks(); });
@@ -61,5 +61,24 @@ describe("openai-compatible adapter (confidential-TEE / self-hosted endpoints)",
     it("requires LLM_BASE_URL", async () => {
         delete process.env.LLM_BASE_URL;
         await expect(_internal.openaiGenerateJson("p")).rejects.toThrow(/LLM_BASE_URL/);
+    });
+});
+
+describe("currentModel — report provenance", () => {
+    // Reports stamp modelUsed on completion. Hard-coding it meant an RCA
+    // produced by a non-Gemini provider was labelled as Gemini, which is the
+    // one field you would rely on when auditing which model made a bad call.
+    it("reports the Gemini model by default", () => {
+        delete process.env.LLM_PROVIDER;
+        // GEMINI_MODEL is captured at module load, so this asserts the default.
+        expect(currentModel()).toBe("gemini-2.5-flash");
+    });
+
+    it("reports the configured model when the provider is flipped", () => {
+        process.env.LLM_PROVIDER = "openai-compatible";
+        process.env.LLM_MODEL = "llama-3.3-70b-versatile";
+        expect(currentModel()).toBe("llama-3.3-70b-versatile");
+        delete process.env.LLM_PROVIDER;
+        delete process.env.LLM_MODEL;
     });
 });
