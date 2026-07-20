@@ -30,9 +30,53 @@ const DETECTORS = [
     { type: "JWT", re: /(?<val>eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})/g },
     { type: "AWS_KEY", re: /(?<val>(?:AKIA|ASIA)[0-9A-Z]{16})/g },
     { type: "GITHUB_TOKEN", re: /(?<val>gh[pousr]_[A-Za-z0-9]{20,})/g },
+
+    // --- Provider credentials, matched on their issuer prefix ---
+    //
+    // These exist because the keyed-secret rule below only fires when a token
+    // appears next to a recognisable key NAME. A token can just as easily show
+    // up bare — inside a URL, a stack frame, a curl line echoed into a log — and
+    // then there is no "key=" for the generic rule to anchor on. Every prefix
+    // here is issuer-assigned and does not occur in ordinary prose, so matching
+    // on the prefix alone carries no realistic false-positive cost.
+    //
+    // Distinct types rather than one PROVIDER_KEY bucket: during an incident the
+    // first question is "which credential do I rotate", and the placeholder is
+    // what an engineer sees before deciding to re-hydrate.
+    { type: "STRIPE_KEY", re: /\b(?<val>(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,})/g },
+    { type: "SLACK_TOKEN", re: /\b(?<val>xox[abeprs]-[A-Za-z0-9-]{10,})/g },
+    // A webhook URL IS the credential — anyone holding it can post as the app.
+    { type: "SLACK_WEBHOOK", re: /(?<val>https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_\/+-]{20,})/g },
+    { type: "GOOGLE_API_KEY", re: /\b(?<val>AIza[0-9A-Za-z_-]{35})\b/g },
+    // Covers OpenAI (sk-, sk-proj-, sk-svcacct-) and Anthropic (sk-ant-). The
+    // underscore forms above are Stripe's and are matched separately.
+    { type: "LLM_API_KEY", re: /\b(?<val>sk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_-]{20,})/g },
+    { type: "GITLAB_TOKEN", re: /\b(?<val>glpat-[A-Za-z0-9_-]{20,})/g },
+    { type: "NPM_TOKEN", re: /\b(?<val>npm_[A-Za-z0-9]{36})\b/g },
+    { type: "SENDGRID_KEY", re: /\b(?<val>SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})/g },
+    { type: "RESEND_KEY", re: /\b(?<val>re_[A-Za-z0-9_]{16,})\b/g },
+
     { type: "BEARER", re: /[Bb]earer\s+(?<val>[A-Za-z0-9\-._~+/]{10,}=*)/g },
     { type: "PASSWORD", re: /:\/\/[^:/@\s]+:(?<val>[^@\s/]+)@/g }, // connection-string password
-    { type: "SECRET", re: /(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?)["']?\s*[:=]\s*["']?(?<val>[A-Za-z0-9\-_./+=]{8,})/gi },
+
+    // Keyed secrets. The `<PREFIX>_` group is what generalises this beyond the
+    // providers enumerated above: STRIPE_KEY, DATADOG_TOKEN, ACME_SECRET and any
+    // other `<SOMETHING>_KEY=` an unknown vendor invents all match, so a new
+    // provider does not need a new pattern to be covered.
+    //
+    // The leading \b is load-bearing: without it the bare `key` alternative
+    // matches inside ordinary words ("monkey=..." would redact), because the
+    // engine retries at every offset. With it, `key` must start a word or follow
+    // a `_`/`-` separator.
+    //
+    // Over-redaction is the deliberate direction here — `primary_key=1234` gets
+    // tokenized. At a trust boundary a false positive costs a placeholder in a
+    // log; a false negative costs a live credential sent to a third party. The
+    // original is recoverable through rehydrate() either way.
+    // `*` not `?` on the prefix group: names stack more than one segment deep
+    // (DATADOG_API_KEY is PREFIX_PREFIX_KEYWORD), and allowing only one segment
+    // silently missed exactly that shape.
+    { type: "SECRET", re: /\b(?:(?:[A-Za-z0-9]+[_-])*(?:password|passwd|pwd|secret|token|key|credential|passphrase)|apikey|auth(?:orization)?)["']?\s*[:=]\s*["']?(?<val>[A-Za-z0-9\-_./+=]{8,})/gi },
     { type: "EMAIL", re: /(?<val>[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g },
     { type: "SSN", re: /\b(?<val>\d{3}-\d{2}-\d{4})\b/g },
     { type: "CARD", re: /\b(?<val>(?:\d[ -]?){13,19})\b/g, validate: (v) => luhnValid(v) },

@@ -106,11 +106,35 @@ describe("writeToGraph", () => {
     expect(edges.length).toBe(0);
   });
 
-  it("skips writing when no downstream components are found", async () => {
+  // This previously asserted that NOTHING was written, which encoded the
+  // starvation bug as intended behaviour: an incident with no detected cascade
+  // contributed no history at all, not even the component that failed. The
+  // council's graph voter reads node incident counts and never touches edges,
+  // so tenants whose incidents produced no edges had a permanently empty graph
+  // and a permanently silent voter.
+  it("records the failing component even when no cascade is detected", async () => {
     const payload = makeAiPayload("auth-service", []); // no citations
     await writeToGraph(db, "incident-1", payload, "tenant-a");
-    expect(nodes.length).toBe(0);
+    expect(nodes.map((n) => n.componentName)).toEqual(["auth-service"]);
     expect(edges.length).toBe(0);
+  });
+
+  // Accumulation across incidents is verified in graphWriter.pg.test.js against
+  // real Postgres — this fake's `where` always returns [], so it cannot model
+  // upsert, and asserting it here would only test the fake.
+
+  // The structured source: the Vanguard names a component per hypothesis, which
+  // needs no registry and no prose-scraping.
+  it("takes downstream components from the Vanguard's hypotheses", async () => {
+    const payload = makeAiPayload("auth-service", []);
+    const hypotheses = [
+      { component: "auth-service" },        // the primary — must not self-edge
+      { component: "token-cache" },
+      { component: "postgres" },
+    ];
+    await writeToGraph(db, "incident-1", payload, "tenant-a", hypotheses);
+    expect(nodes.map((n) => n.componentName).sort()).toEqual(["auth-service", "postgres", "token-cache"]);
+    expect(edges.length).toBe(2);
   });
 
   it("creates one node per unique component and an edge per downstream component", async () => {

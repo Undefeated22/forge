@@ -15,3 +15,7 @@ native/target/
 
 # personal Claude Code permissions — machine-local, never committed
 .claude/settings.local.json
+
+# graphify knowledge-graph output — regenerable build artifact (~1.5MB,
+# includes a semantic cache); regenerate rather than version it
+graphify-out/

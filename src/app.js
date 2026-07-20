@@ -20,6 +20,8 @@ import orgRoutes from "./modules/org/org.routes.js";
 import authPlugin from "./plugins/auth.js";
 import { runbookRoutes } from "./modules/runbooks/runbook.routes.js";
 import { ragRoutes } from "./modules/rag/rag.routes.js";
+import ingestRoutes from "./modules/ingest/ingest.routes.js";
+import signalRoutes from "./modules/ingest/signals.routes.js";
 import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
 import helmet from "@fastify/helmet";
@@ -90,6 +92,8 @@ export function buildApp() {
     app.register(incidentChatRoutes);
     app.register(runbookRoutes);
     app.register(ragRoutes);
+    app.register(ingestRoutes);
+    app.register(signalRoutes);
 
     app.register(swagger, {
         openapi: {

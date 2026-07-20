@@ -18,6 +18,20 @@ export function llmProvider() {
     return (process.env.LLM_PROVIDER || "gemini").toLowerCase();
 }
 
+/**
+ * The model that actually served the request, for provenance on the report.
+ *
+ * Reports previously hard-coded "gemini-2.5-flash" on completion, which silently
+ * became a lie the moment LLM_PROVIDER was flipped — an RCA produced by Groq was
+ * stamped as Gemini. Provenance that is wrong is worse than absent: it is the
+ * field you would trust when auditing which model made a bad call.
+ */
+export function currentModel() {
+    return llmProvider() === "openai-compatible"
+        ? modelFor("primary")
+        : GEMINI_MODEL;
+}
+
 // ---------------------------------------------------------------- Gemini ----
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_TIMEOUT_MS = 60_000;
@@ -38,7 +52,8 @@ async function geminiCallWithRetry(model, prompt, maxRetries = 4) {
         } catch (error) {
             const msg = error.message ?? "";
             const isRetryable =
-                msg.includes("503") || msg.includes("high demand") || msg.includes("fetch failed") ||
+                msg.includes("503") || msg.includes("429") || msg.includes("high demand") ||
+                msg.includes("Too Many Requests") || msg.includes("fetch failed") ||
                 msg.includes("ECONNRESET") || msg.includes("ETIMEDOUT") || msg.includes("aborted") || msg.includes("network");
             if (!isRetryable || attempt === maxRetries) throw error;
             const waitMs = 5000 * attempt;
@@ -66,21 +81,37 @@ async function* geminiGenerateStream(prompt, { signal } = {}) {
 }
 
 // ------------------------------------------------------ OpenAI-compatible ----
-function openaiConfig() {
+// Two tiers, because the council needs volume and the front door needs quality.
+//
+//   primary — hypothesis generation and the RCA. Higher TPM, so a big prompt
+//             (fused telemetry + graph + RAG + memory) fits in one call.
+//   fast    — high-volume scoring/evaluation. Far higher requests/day, which is
+//             what caps how many INVESTIGATIONS a day you can run. Note it is
+//             usually LOWER TPM, so its prompts must stay small; the tier buys
+//             daily capacity, not per-call throughput.
+//
+// Falls back to the primary when LLM_MODEL_FAST is unset, so a single-model
+// deployment keeps working with no config change.
+export function modelFor(tier = "primary") {
+    const primary = process.env.LLM_MODEL || "gpt-4o-mini";
+    return tier === "fast" ? (process.env.LLM_MODEL_FAST || primary) : primary;
+}
+
+function openaiConfig(model) {
     const baseUrl = process.env.LLM_BASE_URL;
     if (!baseUrl) throw new Error("LLM_BASE_URL is required for the openai-compatible provider");
     return {
         baseUrl: baseUrl.replace(/\/+$/, ""),
         apiKey: process.env.LLM_API_KEY,
-        model: process.env.LLM_MODEL || "gpt-4o-mini",
+        model: model ?? modelFor("primary"),
     };
 }
 function openaiHeaders(apiKey) {
     return { "content-type": "application/json", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) };
 }
 
-async function openaiGenerateJson(prompt, { timeoutMs = 60_000 } = {}) {
-    const { baseUrl, apiKey, model } = openaiConfig();
+async function openaiGenerateJson(prompt, { timeoutMs = 60_000, model: modelOverride } = {}) {
+    const { baseUrl, apiKey, model } = openaiConfig(modelOverride);
     const res = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: openaiHeaders(apiKey),
@@ -97,8 +128,8 @@ async function openaiGenerateJson(prompt, { timeoutMs = 60_000 } = {}) {
     return json.choices?.[0]?.message?.content ?? "";
 }
 
-async function* openaiGenerateStream(prompt, { signal } = {}) {
-    const { baseUrl, apiKey, model } = openaiConfig();
+async function* openaiGenerateStream(prompt, { signal, model: modelOverride } = {}) {
+    const { baseUrl, apiKey, model } = openaiConfig(modelOverride);
     const res = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: openaiHeaders(apiKey),

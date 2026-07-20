@@ -1,6 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+import { generateJson } from "../../lib/llm.js";
 
 // ─────────────────────────────────────────────────────────────
 // PART 1: AI PASS — produces raw judgments only, NO arithmetic
@@ -15,12 +13,10 @@ export async function scoreRunbook(aiPayload) {
     const rootCause = aiPayload?.rootCauseAnalysis?.definitiveRootCause ?? "unknown";
     const primaryComponent = aiPayload?.incidentFingerprint?.primaryFailingComponent ?? "unknown";
 
-    const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        generationConfig: { responseMimeType: "application/json" }
-    });
-
-    const judgments = await callScorerWithRetry(model, buildPrompt(rootCause, primaryComponent, runbook));
+    // Routed through the lib/llm.js provider seam so LLM_PROVIDER also moves
+    // runbook scoring to a confidential endpoint — it used to hold its own
+    // Gemini client and ignored the flip.
+    const judgments = await generateJson(buildPrompt(rootCause, primaryComponent, runbook));
     const parsed = JSON.parse(judgments);
 
     // ─── PART 2: CODE computes all scores + ranking deterministically ───
@@ -207,31 +203,4 @@ function topoSort(meritOrdered) {
 
     for (const step of meritOrdered) visit(step);
     return result;
-}
-
-// Retry wrapper for 503s, same pattern as the main analysis service
-async function callScorerWithRetry(model, prompt, maxRetries = 4) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            const result = await model.generateContent(prompt);
-            return result.response.text();
-        } catch (error) {
-            const msg = error.message ?? "";
-            const isRetryable =
-                msg.includes("503") ||
-                msg.includes("429") ||
-                msg.includes("high demand") ||
-                msg.includes("Too Many Requests") ||
-                msg.includes("fetch failed") ||
-                msg.includes("ECONNRESET") ||
-                msg.includes("ETIMEDOUT") ||
-                msg.includes("network");
-
-            if (!isRetryable || attempt === maxRetries) throw error;
-
-            const waitMs = 5000 * attempt;
-            console.log(`[Analysis] Transient error (${msg.slice(0, 40)}) — attempt ${attempt}/${maxRetries}, retrying in ${waitMs / 1000}s...`);
-            await new Promise(r => setTimeout(r, waitMs));
-        }
-    }
 }
