@@ -37,7 +37,12 @@ export function buildApp() {
 
     app.register(cors, {
         origin: allowedOrigins,
-        credentials: true
+        credentials: true,
+        // @fastify/cors v11 narrowed its default to "GET,HEAD,POST", which
+        // rejects the browser preflight for every PATCH/PUT/DELETE — silently
+        // breaking runbook check-off, role changes, and doc deletion. State the
+        // methods we actually serve.
+        methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     });
 
     // ---- helmet + rate-limit MUST register before any route plugin: Fastify
