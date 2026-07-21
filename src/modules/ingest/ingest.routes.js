@@ -15,6 +15,24 @@ import { findOrCreateOpenIncident, reopenRecentlyResolved, startLifecycleSweeper
 const MAX_BODY_BYTES = 1 * 1024 * 1024;   // an alert payload, not a log dump
 const EXCERPT_CHARS = 500;
 
+// Backpressure. Unset = off, and off costs nothing: the queue-depth probe is a
+// Redis round-trip we only pay for once the knob is set. Needs a real measured
+// value under load — guessing one is how you shed traffic that was fine.
+const SHED_DEPTH = Number(process.env.INGEST_SHED_DEPTH ?? 0);
+// Score above which a signal is never shed and jumps the queue. Sits well above
+// tau* (~0.048) — that threshold answers "is this worth an LLM at all", this one
+// answers "if we can only afford some of these, which".
+export const URGENT_SCORE = 0.5;
+
+// Split out from the handler purely so the cost decision is testable without a
+// live queue. `depth` is null when the probe was skipped (feature off).
+export function analysisDecision({ score, depth, shedDepth = SHED_DEPTH }) {
+    return {
+        shed: shedDepth > 0 && score < URGENT_SCORE && depth > shedDepth,
+        priority: score > URGENT_SCORE ? 1 : 10,
+    };
+}
+
 export default async function ingestRoutes(fastify) {
     // Closes the loop on ingested incidents: without a sweep, every entity that
     // ever fired holds its fingerprint slot forever and a later recurrence could
@@ -145,10 +163,27 @@ export default async function ingestRoutes(fastify) {
         });
 
         let reportId = null;
+        let shed = false;
         if (created) {
-            const report = await createPendingReport(fastify.db, incidentId);
-            reportId = report.id;
-            await analysisQueue.add("analyze-incident", { incidentId, reportId });
+            // Shed the reasoning pass, never the record. The signals row and the
+            // evidence row above are already written and stay written — they are
+            // the calibration denominator and the outage's evidence trail. What a
+            // saturated queue can't afford is another LLM job.
+            // ponytail: no retry — a shed incident is never analyzed. Add a
+            // backlog sweep if sheds turn out to be more than rare.
+            const depth = SHED_DEPTH > 0 && signal.score < URGENT_SCORE
+                ? await analysisQueue.getWaitingCount()
+                : null;
+            let priority;
+            ({ shed, priority } = analysisDecision({ score: signal.score, depth }));
+
+            if (shed) {
+                req.log.warn({ slug, incidentId, score: signal.score, depth }, "[Ingest] shed analysis — queue saturated");
+            } else {
+                const report = await createPendingReport(fastify.db, incidentId);
+                reportId = report.id;
+                await analysisQueue.add("analyze-incident", { incidentId, reportId }, { priority });
+            }
         } else {
             // Existing incident gained a signal — push it to anyone watching,
             // but do NOT pay for another reasoning pass.
@@ -161,7 +196,8 @@ export default async function ingestRoutes(fastify) {
         }
 
         return reply.status(202).send({
-            status: created ? "incident-opened" : reopened ? "reopened" : "attached",
+            status: created ? (shed ? "incident-opened-analysis-shed" : "incident-opened")
+                : reopened ? "reopened" : "attached",
             incidentId,
             signalCount,
             reportId,
