@@ -151,33 +151,116 @@ function normalizeEntity(entity) {
 // less code to keep correct than a Grafana class and a Datadog class.
 const pick = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== "");
 
+// Some senders wrap the interesting fields in an envelope. Unwrapping is the
+// ONLY per-vendor knowledge here — once the payload is flattened, the shared
+// alias table below covers everyone. Ordered most-specific first: a nested
+// service name beats a root-level one.
+function envelopes(body) {
+    if (!body || typeof body !== "object") return [{}];
+    const out = [];
+    const push = (v) => { if (v && typeof v === "object") out.push(v); };
+
+    // AWS SNS delivers CloudWatch alarms as a JSON *string* in .Message.
+    let sns = null;
+    if (typeof body.Message === "string") {
+        try { sns = JSON.parse(body.Message); } catch { /* not JSON: ignore */ }
+    }
+    // A CloudWatch dimension is {name: "InstanceId", value: "i-abc"} — the
+    // *value* is the entity, so remap rather than let named() take .name.
+    // Same for a New Relic target, whose .name would otherwise lose to the
+    // condition name. Remapping here keeps a bare `name` out of the shared
+    // alias table, where it would wrongly beat Honeycomb's `dataset`.
+    const dim = (sns ?? body).Trigger?.Dimensions?.[0];
+    if (dim?.value) push({ entity: dim.value });
+    if (Array.isArray(body.targets) && body.targets[0]?.name) push({ entity: body.targets[0].name });
+
+    push(body.event?.data);                                   // PagerDuty v3
+    push(body.data?.issue ?? body.data?.error ?? body.data);  // Sentry
+    push(body.alert);                                         // Opsgenie
+    push(body.incident);                                      // Statuspage-style
+    push(sns);                                                // CloudWatch alarm
+    push(Array.isArray(body.alerts) ? body.alerts[0] : null); // Grafana / Alertmanager
+    push(body.result);                                        // Splunk
+    push(body);
+    return out.length ? out : [{}];
+}
+
+// An entity arrives as a bare string from most senders and as an object from
+// PagerDuty ({summary}), Sentry ({slug}), and New Relic ({name}).
+function named(v) {
+    if (typeof v === "string") return v;
+    if (v && typeof v === "object") return pick(v.summary, v.name, v.slug, v.value, v.title);
+    return undefined;
+}
+
 export function normalizeSignal(body) {
-    // Grafana alerting posts a batch; take the first alert as the representative
-    // and let the rest arrive as their own signals if the sender splits them.
-    const alert = Array.isArray(body?.alerts) ? body.alerts[0] : null;
-    const labels = { ...(body?.labels ?? {}), ...(alert?.labels ?? {}) };
-    const annotations = { ...(body?.annotations ?? {}), ...(alert?.annotations ?? {}) };
-    const tags = normalizeTags(body?.tags);
+    const scopes = envelopes(body);
+    // Scope priority dominates alias order: check every scope for `service`
+    // before falling back to `host` anywhere.
+    const field = (...names) => pick(...scopes.flatMap((s) => names.map((n) => named(s?.[n]))));
+    const merged = (key) => Object.assign({}, ...scopes.slice().reverse().map((s) => s?.[key] ?? {}));
+
+    const labels = merged("labels");
+    const annotations = merged("annotations");
+    const tags = normalizeTags(field("tags") ?? scopes.map((s) => s?.tags).find(Boolean));
+    const isGrafana = Array.isArray(body?.alerts);
 
     const state = String(
-        pick(alert?.status, body?.status, body?.state, body?.alert_transition, "firing")
+        pick(
+            field("status", "state", "alert_transition", "event_action", "action"),
+            named(body?.NewStateValue), scopes.map((s) => s?.NewStateValue).find(Boolean),
+            "firing",
+        )
     ).toLowerCase();
 
     return {
-        source: pick(body?.source, labels.source, alert ? "grafana" : undefined, "generic"),
+        source: pick(
+            field("source"), labels.source,
+            body?.event?.data ? "pagerduty" : undefined,
+            body?.data?.issue ? "sentry" : undefined,
+            typeof body?.Message === "string" ? "cloudwatch" : undefined,
+            Array.isArray(body?.targets) ? "newrelic" : undefined,
+            body?.alert?.alertId ? "opsgenie" : undefined,
+            isGrafana ? "grafana" : undefined,
+            body?.alert_transition || body?.alert_type ? "datadog" : undefined,
+            body?.search_name ? "splunk" : undefined,
+            labels.alertname && body?.status ? "prometheus" : undefined,
+            "generic",
+        ),
         entity: pick(
             labels.service, labels.resource, labels.job, labels.instance,
-            tags.service, tags.host, body?.service, body?.entity, body?.host,
-        ) ?? "unknown",
+            tags.service, tags.host,
+            field(
+                "service", "entity", "host", "hostname",   // common
+                "service_name", "serviceName", "project",  // Sentry / Splunk
+                "dataset", "app", "cluster", "resource",   // Honeycomb / k8s
+                "InstanceId", "AlarmName",                 // CloudWatch
+            ),
+            // Last resort: the alert's own name. Far from ideal, but it groups
+            // by *what broke* instead of dumping every unrecognised sender into
+            // one shared "unknown" bucket, which silently merged unrelated
+            // incidents and only ever analysed the first.
+            field("alertname", "condition_name", "search_name", "trigger"),
+            labels.alertname,
+        ) ?? null,   // null = unresolvable; the route rejects rather than merges
         severity: pick(
-            labels.severity, body?.severity, body?.alert_type, body?.priority, body?.level,
+            labels.severity,
+            field("severity", "alert_type", "priority", "level", "urgency", "impact"),
+            named(scopes.map((s) => s?.NewStateValue).find(Boolean)) === "ALARM" ? "critical" : undefined,
         ) ?? "warning",
-        title: pick(labels.alertname, annotations.summary, body?.title, body?.alertname) ?? "",
-        message: pick(annotations.description, annotations.summary, body?.body, body?.message) ?? "",
+        title: pick(
+            labels.alertname, annotations.summary,
+            field("title", "alertname", "condition_name", "AlarmName", "search_name", "message"),
+        ) ?? "",
+        message: pick(
+            annotations.description, annotations.summary,
+            field("body", "message", "description", "NewStateReason", "culprit", "AlarmDescription"),
+        ) ?? "",
         // "resolved"/"ok"/"recovery" all mean the same all-clear
-        state: /^(resolved|ok|recovery|success)$/.test(state) ? "resolved" : "firing",
+        state: /^(resolved|resolve|ok|recovery|success|closed|close|acknowledged)$/.test(state)
+            ? "resolved" : "firing",
         breachedThreshold: Boolean(
-            pick(body?.breachedThreshold, body?.threshold_breached, annotations.threshold)
+            pick(field("breachedThreshold", "threshold_breached"), annotations.threshold)
         ),
     };
 }

@@ -98,6 +98,18 @@ export default async function ingestRoutes(fastify) {
         const tenantId = org.id;
         const signal = triage(req.body, { tenantId });
 
+        // No entity means no fingerprint, and the old fallback of the literal
+        // string "unknown" was worse than a rejection: every unrecognised
+        // payload in the tenant collapsed onto ONE shared fingerprint, so
+        // unrelated alerts merged into a single incident and only the first
+        // ever got analysed. A misconfigured sender should hear about it.
+        if (!signal.entity) {
+            return reply.status(422).send({
+                error: "Could not identify the affected entity",
+                hint: "Send a service/host/entity field, a Prometheus-style label, or a service:<name> tag",
+            });
+        }
+
         // Record the decision BEFORE acting on it, so a suppressed signal is
         // just as durable as an escalated one. Without the suppressed rows
         // there is no denominator and the threshold can never be calibrated.
@@ -225,7 +237,8 @@ export default async function ingestRoutes(fastify) {
             keyVersion: org.ingestKeyVersion,
             usage: {
                 signed: "Grafana 12+: HMAC-SHA256 over `<timestamp>:<body>`, sent as x-grafana-alerting-signature with x-grafana-alerting-timestamp",
-                static: "Datadog and others: send the key as x-forge-ingest-key or Authorization: Bearer <key>",
+                static: "Everyone else: send the key as x-forge-ingest-key or Authorization: Bearer <key>",
+                senders: "Payloads are normalized from Grafana, Prometheus/Alertmanager, Datadog, Sentry, PagerDuty, Opsgenie, New Relic, CloudWatch (via SNS), Splunk and Honeycomb. Anything else works too if it carries a service/host/entity field, a Prometheus-style label, or a service:<name> tag.",
             },
         };
     });
