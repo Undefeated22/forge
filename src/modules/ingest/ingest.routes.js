@@ -11,6 +11,7 @@ import { encryptField } from "../../lib/fieldCrypto.js";
 import { publishEvent } from "../../events/publisher.js";
 import { PERMISSIONS } from "../auth/rbac.js";
 import { findOrCreateOpenIncident, reopenRecentlyResolved, startLifecycleSweeper } from "./lifecycle.js";
+import { SENDERS, buildSetup } from "./senders.js";
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024;   // an alert payload, not a log dump
 const EXCERPT_CHARS = 500;
@@ -241,6 +242,27 @@ export default async function ingestRoutes(fastify) {
                 senders: "Payloads are normalized from Grafana, Prometheus/Alertmanager, Datadog, Sentry, PagerDuty, Opsgenie, New Relic, CloudWatch (via SNS), Splunk and Honeycomb. Anything else works too if it carries a service/host/entity field, a Prometheus-style label, or a service:<name> tag.",
             },
         };
+    });
+
+    // The connect catalog: everything a UI needs to render one button per
+    // sender. Same permission as /credentials because it embeds the live key.
+    fastify.get("/ingest/setup", {
+        preHandler: fastify.requirePermission(PERMISSIONS.ORG_MANAGE),
+    }, async (req, reply) => {
+        const tenantId = req.user.organizationId;
+        const [org] = await fastify.db
+            .select().from(organizations).where(eq(organizations.id, tenantId)).limit(1);
+        if (!org?.ingestSlug) {
+            return reply.status(409).send({ error: "Ingest is not provisioned for this organization" });
+        }
+
+        const url = `${process.env.APP_URL ?? ""}/ingest/${org.ingestSlug}`;
+        const key = deriveIngestKey(org.id, org.ingestKeyVersion);
+        const only = req.query?.sender;
+        const list = only ? SENDERS.filter((s) => s.id === only) : SENDERS;
+        if (only && !list.length) return reply.status(404).send({ error: "Unknown sender" });
+
+        return { success: true, senders: list.map((s) => buildSetup(s, { url, key })) };
     });
 
     // Revocation. The whole justification for deriving keys instead of storing
