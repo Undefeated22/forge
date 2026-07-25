@@ -14,7 +14,19 @@ import { StringDecoder } from "node:string_decoder";
 // a huge log" gap that a pure earliest-first head would miss, and it feeds both
 // the fast analysis pass and the deep map-reduce pass.
 
-export const MAX_RETAINED_BYTES = 4 * 1024 * 1024; // 4 MB of reduced text total
+// How much reduced text to keep per upload.
+//
+// Was 4 MB, which meant a 3.9 MB log was stored essentially whole — and then the
+// analysis, which can only feed ~18k chars to the model in one call, read the
+// FIRST 0.45% of it. Keeping more than the pipeline can consume does not
+// preserve information; it just moves the loss from this relevance-ranked
+// reducer (earliest trigger + highest severity, from anywhere in the file) to a
+// blind `slice(0, n)` downstream. Reduce here, where the choice is informed.
+//
+// 512 KB is ~30x the single-call telemetry budget, which leaves the deep pass
+// and the MCTS investigator a real corpus to select from without storing a log
+// nothing will ever read.
+export const MAX_RETAINED_BYTES = Number(process.env.EVIDENCE_MAX_BYTES ?? 512 * 1024);
 // Split the budget: keep the chronological trigger AND a generous pool of
 // error/warning evidence from anywhere in the file.
 const EARLIEST_BYTES = Math.floor(MAX_RETAINED_BYTES * 0.4);

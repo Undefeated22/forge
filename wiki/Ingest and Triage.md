@@ -75,6 +75,18 @@ Entity-only rather than entity+condition, so "auth is unhealthy" collects both
 the latency alert and the error-rate alert instead of fragmenting one root cause.
 Replica suffixes collapse: `auth-7d9f` and `auth-2b1c` are one entity.
 
+Ten senders are normalized into that entity: Grafana, Prometheus/Alertmanager,
+Datadog, Sentry, PagerDuty, Opsgenie, New Relic, CloudWatch (via SNS), Splunk,
+Honeycomb. Not per-vendor adapters — an envelope unwrap (some senders nest the
+payload; CloudWatch ships JSON as a *string* inside `Message`) followed by one
+shared alias table.
+
+> [!warning] An unresolvable entity is a 422, not `"unknown"`
+> The entity IS the fingerprint, so the old `?? "unknown"` default gave every
+> unrecognised payload in a tenant the same fingerprint — unrelated alerts
+> merged into one incident and only the first was ever analysed. Rejecting tells
+> the misconfigured sender instead of silently corrupting incident grouping.
+
 This is first-pass dedup and nothing more. It cannot know that the auth incident
 and the checkout incident are one root cause a hop apart — that cross-entity
 merge belongs to the graph layer.
@@ -139,6 +151,30 @@ path — otherwise the stronger path is decorative.
 
 The slug in the URL is random and public because it travels before any credential
 is checked; using the org id would make tenants enumerable.
+
+## Backpressure
+
+Two knobs on the enqueue, both keyed off the triage score (there is no tier
+field — `triage()` returns `escalate`, `score`, `threshold`):
+
+| | |
+|---|---|
+| priority | `score > 0.5` → BullMQ `priority: 1`, else `10`. Lower is sooner. |
+| shed | `INGEST_SHED_DEPTH` (unset = off). Above that queue depth, a sub-0.5 analysis is not enqueued. |
+
+Off is free — the `getWaitingCount()` probe only runs when the knob is set *and*
+the score is non-urgent.
+
+> [!important] Shed the enqueue, never the row
+> The `signals` and `evidence` rows are written either way. A suppressed signal
+> is already just as durable as an escalated one — that's the calibration
+> denominator — and shedding obeys the same rule. Only the LLM job is dropped.
+
+> [!warning] A shed incident is never analyzed
+> No retry, no backlog sweep. Fine while sheds are rare (needs a saturated queue
+> AND a sub-0.5 score); if not, sweep open incidents with no report.
+
+`analysisDecision()` in `ingest.routes.js`, tested in `shed.test.js`.
 
 ## What is deliberately not here
 

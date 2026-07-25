@@ -73,6 +73,34 @@ export async function findSimilarIncidents(db, { tenantId = "default", embedding
 }
 
 /**
+ * Past incidents whose primary component is one of `components` — the join that
+ * turns the causal graph into a retrieval index. These are found by TOPOLOGY,
+ * not text, so they surface repeats the vector pass misses when the words differ.
+ *
+ * Over-fetches by the exclude-count so the SQL LIMIT can't be eaten by rows the
+ * caller already has from the vector pass.
+ */
+export async function findIncidentsByComponent(db, { tenantId = "default", components, excludeIncidentId = null, excludeIds = [], limit = 3 }) {
+    if (!components?.length) return [];
+    const lowered = components.map((c) => String(c).toLowerCase().trim());
+    // A parameterized IN list — drizzle's sql template does not coerce a JS array
+    // into a Postgres array for ANY(), so sql.join builds the placeholders.
+    const inList = sql.join(lowered.map((c) => sql`${c}`), sql`, `);
+    const result = await db.execute(sql`
+        SELECT incident_id, report_id, summary, primary_component, severity
+        FROM incident_embeddings
+        WHERE tenant_id = ${tenantId}
+          AND LOWER(primary_component) IN (${inList})
+          ${excludeIncidentId ? sql`AND incident_id <> ${excludeIncidentId}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT ${limit + excludeIds.length}
+    `);
+    const rows = result.rows ?? result;
+    const exclude = new Set(excludeIds);
+    return rows.filter((r) => !exclude.has(r.incident_id)).slice(0, limit);
+}
+
+/**
  * Convenience: embed the current incident's telemetry as a query and return its
  * similar past incidents in one call.
  */

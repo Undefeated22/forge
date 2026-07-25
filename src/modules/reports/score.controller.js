@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { reports, incidents } from "../../db/schema.js";
 import { scoreRunbook } from "../analysis/runbookScorer.js";
+import { quotaResetMs, retryDelayMs, currentModel } from "../../lib/llm.js";
 import { saveScoredRunbook } from "./reports.repository.js";
 import { withFencedLease } from "../../lib/fencedLock.js";
 import { createRedisConnection } from "../../config/redis.js";
@@ -73,6 +74,23 @@ export async function rescoreHandler(req, reply) {
 
     } catch (error) {
         req.log.error(error);
+
+        // A spent quota is not a server fault, and saying 500 sends the caller
+        // to check our logs for a condition only they can wait out. The worker
+        // handles this by deferring the job; a synchronous request cannot defer,
+        // so the honest answer is 429 plus the reset the provider stated.
+        const waitMs = quotaResetMs(error) ?? retryDelayMs(error);
+        if (waitMs !== null) {
+            const retryAfter = Math.ceil(waitMs / 1000);
+            return reply
+                .status(429)
+                .header("retry-after", retryAfter)
+                .send({
+                    error: `Model quota is exhausted for ${currentModel()}. Retry in about ${Math.ceil(retryAfter / 60)} minute(s).`,
+                    retryAfterSeconds: retryAfter,
+                });
+        }
+
         return reply.status(500).send({ error: "Re-scoring failed" });
     }
 }

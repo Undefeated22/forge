@@ -48,9 +48,9 @@ Node 22 / Fastify 5 / Postgres (+pgvector) / Redis (BullMQ) / Groq (text) + Gemi
 
 > [!question] Unresolved
 > - Drizzle snapshots are stale; migrations 0003+ are hand-written SQL. See [[Operations]].
-> - MCTS investigation is specified but unbuilt — the reward is now computable, but Forge has no live production access, so the action space is retrieval over what it already holds. See `ROADMAP.md`.
 > - Trust-weighted pooling needs a non-symmetric DeGroot update; symmetric consensus converges to the UNWEIGHTED average. See [[The Council]].
 
 > [!success] Resolved since
+> - MCTS investigation is built (`lib/mcts.js` + `analysis/investigator.js`). It runs ONLY when fused telemetry overflows the context window, and its refined belief votes in the council. See [[The Council]].
 > - `runbookScorer.js` now goes through `lib/llm.js`, so every text caller follows a provider flip.
 > - `KNOWN_COMPONENTS` is no longer a ceiling — component discovery is structured + learned + convention-based. See [[The Council]].

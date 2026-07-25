@@ -1,8 +1,10 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { signals } from "../../db/schema.js";
 import { PERMISSIONS } from "../auth/rbac.js";
+import { uuidParams } from "../../lib/uuidParams.js";
 import { COSTS, costOptimalThreshold } from "../../lib/triage.js";
 import { sweepThreshold, evaluateThreshold, reliabilityCurve } from "../../lib/calibration.js";
+import { conformalReport, minCalibrationForAlpha } from "../../lib/conformal.js";
 
 // Visibility into what triage threw away.
 //
@@ -64,6 +66,7 @@ export default async function signalRoutes(fastify) {
     fastify.post("/signals/:id/label", {
         preHandler: fastify.requirePermission(PERMISSIONS.ANALYSIS_RUN),
         schema: {
+            params: uuidParams("id"),
             body: {
                 type: "object",
                 required: ["label"],
@@ -126,5 +129,43 @@ export default async function signalRoutes(fastify) {
             potentialCostReduction: current.expectedCost - empirical.expectedCost,
             reliability: reliabilityCurve(rows),
         };
+    });
+
+    // The conformal triage GATE. Where /calibration answers "is the threshold
+    // right", this answers "when may triage act WITHOUT a human, and with a
+    // distribution-free guarantee". A signal's score becomes a prediction SET:
+    // a singleton is a decision the coverage guarantee lets the gate automate;
+    // both-labels or neither is handed to a human. See lib/conformal.js.
+    fastify.get("/signals/conformal", {
+        preHandler: fastify.requirePermission(PERMISSIONS.INCIDENTS_READ),
+    }, async (req) => {
+        const tenantId = req.user.organizationId;
+        // alpha = miscoverage; 1-alpha is the coverage guarantee. Clamped to a
+        // sane band so a caller cannot ask for a 0% or 100% error rate.
+        const alpha = Math.min(0.5, Math.max(0.01, Number(req.query.alpha) || 0.1));
+
+        const rows = await fastify.db
+            .select({ score: signals.score, label: signals.label })
+            .from(signals)
+            .where(and(eq(signals.tenantId, tenantId), sql`${signals.label} IS NOT NULL`));
+
+        const report = conformalReport(rows, alpha);
+
+        // Below the per-class minimum the guarantee cannot bite — every decision
+        // defers to a human. Say exactly how many more labels of which class it
+        // would take rather than return a gate that looks operational but isn't.
+        if (!report.feasible.incident || !report.feasible.noise) {
+            return {
+                success: true,
+                status: "insufficient-labels",
+                alpha,
+                minLabelsPerClass: minCalibrationForAlpha(alpha),
+                have: report.perClass,
+                labelsNeeded: report.labelsNeeded,
+                message: `At alpha=${alpha} the gate needs ${minCalibrationForAlpha(alpha)} labelled signals of EACH class before it can act without a human.`,
+            };
+        }
+
+        return { success: true, status: "ok", ...report };
     });
 }

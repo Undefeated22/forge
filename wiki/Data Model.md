@@ -36,7 +36,7 @@ Postgres + `pgvector`. Defined in `src/db/schema.js` (drizzle). Migrations in `d
 | `incidents` | `tenant_id` = owning org. `status` defaults `pending`. |
 | `evidence` | `extracted_data` holds the ≤4 MB reduced slice, redacted then AES-GCM encrypted (`gcm1:` prefix). Was `jsonb`, migrated to `text` in 0002. |
 | `evidence_redactions` | placeholder → **encrypted** original. Unique `(incident_id, placeholder)`. `value_ciphertext` never decryptable from the DB alone — needs `REDACTION_KEY`. See [[Privacy Architecture]]. |
-| `reports` | `ai_payload` (jsonb RCA), `scored_runbook`, `escalation_tier`, `model_used`, `status`. |
+| `reports` | `ai_payload` (jsonb RCA), `scored_runbook`, `escalation_tier`, `model_used`, `status`, `failure_reason` (why a `failed` report failed, operator-readable), `investigation` (jsonb MCTS trace — NULL unless the deep path ran; see [[The Council]]). |
 | `incident_chat_messages` | Durable chat transcript. `role` = user/assistant, `sources` holds the assistant turn's grounding refs. |
 
 ## Vector stores

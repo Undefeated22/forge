@@ -175,10 +175,32 @@ Two live contention paths made this necessary, not hypothetical: BullMQ
 stalled-job re-delivery (default 30s lock, shorter than an LLM analysis under
 retry), and `POST /reports/:id/score` racing the worker's own scoring step.
 
-## Not built
+## MCTS investigation — `analysis/investigator.js`
 
-MCTS investigation. The reward `H(R|e_s) - H(R|e_s ∪ {outcome(a)})` is now
-computable from these beliefs — but Forge has no live production access, so the
-action space is retrieval over what it already holds, and `hybridContext.js`
-already fuses graph and vector retrieval in one shot. It earns its place when the
-causal graph outgrows the context window. See `ROADMAP.md`.
+The reward `H(R|e_s) - H(R|e_s ∪ {outcome(a)})` is computed from these beliefs:
+an action is "read telemetry segment *i*", and its reward is how much normalized
+entropy over the shared hypothesis set that read collapsed. `lib/mcts.js` is the
+generic UCT search; the investigator supplies the domain.
+
+**It is gated on `ctx.truncated`.** When the fused evidence fits in one context
+window, search is skipped entirely — `hybridContext.js` already fuses graph and
+vector retrieval in one pass, and searching over text a single prompt can hold is
+ceremony. It earns its place on the deep path, where `deepAnalyze` otherwise maps
+over up to 12 chunks *blindly*: ~360k tokens, 3.6x the entire Groq free-tier
+daily budget. Search picks which segments to read instead, default budget 4 real
+model calls (`MCTS_BUDGET`), max depth 3, on the **fast** tier.
+
+Forge has no live production access — it cannot pull a fresh metric or shell into
+a host. So the action space is retrieval over what it already holds, a smaller
+MDP than the literature's.
+
+The refined belief joins the council as a voter (`id: "investigator"`): it read
+evidence no other voter saw, which makes it genuinely independent rather than a
+second opinion on the same text. The whole trace persists to
+`reports.investigation` so an RCA is auditable back to the evidence that produced
+it — NULL on most reports, by design.
+
+Two guards worth knowing: reward is clamped at zero (UCT with `c=√2` assumes
+rewards in `[0,1]`; evidence that *widened* the belief gets no credit, not
+negative credit), and an unparseable belief update counts as zero information
+rather than a guess.

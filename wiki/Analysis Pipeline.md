@@ -90,6 +90,10 @@ Embeds the **first 8000 chars of the fused timeline** — storage and query embe
 
 Fast pass runs first. It escalates to the map-reduce deep pass only when **both** conditions hold: the fast pass saw a truncated view *and* came back unsure (`chunker.js::shouldEscalate`). Confident-on-truncated-input returns immediately — no wasted calls.
 
+On that same truncated-evidence condition, the worker also runs a budgeted MCTS
+over *which* segments to read, rather than mapping over all 12 blindly. See
+[[The Council]].
+
 ## 5. Score the runbook — `runbookScorer.js`
 
 Deliberately two-phase:

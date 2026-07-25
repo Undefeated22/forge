@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { organizations, evidence, signals } from "../../db/schema.js";
 import { analysisQueue } from "../../queues/analysis.queue.js";
 import { createPendingReport } from "../reports/reports.repository.js";
-import { triage } from "../../lib/triage.js";
+import { triage, splitBatch } from "../../lib/triage.js";
 import { deriveIngestKey, verifyIngestRequest } from "../../lib/ingestAuth.js";
 import { createRedactor } from "../../lib/redaction.js";
 import { redactionEnabled } from "../../lib/redactionCrypto.js";
@@ -11,9 +11,28 @@ import { encryptField } from "../../lib/fieldCrypto.js";
 import { publishEvent } from "../../events/publisher.js";
 import { PERMISSIONS } from "../auth/rbac.js";
 import { findOrCreateOpenIncident, reopenRecentlyResolved, startLifecycleSweeper } from "./lifecycle.js";
+import { SENDERS, buildSetup } from "./senders.js";
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024;   // an alert payload, not a log dump
 const EXCERPT_CHARS = 500;
+
+// Backpressure. Unset = off, and off costs nothing: the queue-depth probe is a
+// Redis round-trip we only pay for once the knob is set. Needs a real measured
+// value under load — guessing one is how you shed traffic that was fine.
+const SHED_DEPTH = Number(process.env.INGEST_SHED_DEPTH ?? 0);
+// Score above which a signal is never shed and jumps the queue. Sits well above
+// tau* (~0.048) — that threshold answers "is this worth an LLM at all", this one
+// answers "if we can only afford some of these, which".
+export const URGENT_SCORE = 0.5;
+
+// Split out from the handler purely so the cost decision is testable without a
+// live queue. `depth` is null when the probe was skipped (feature off).
+export function analysisDecision({ score, depth, shedDepth = SHED_DEPTH }) {
+    return {
+        shed: shedDepth > 0 && score < URGENT_SCORE && depth > shedDepth,
+        priority: score > URGENT_SCORE ? 1 : 10,
+    };
+}
 
 export default async function ingestRoutes(fastify) {
     // Closes the loop on ingested incidents: without a sweep, every entity that
@@ -78,7 +97,45 @@ export default async function ingestRoutes(fastify) {
         }
 
         const tenantId = org.id;
-        const signal = triage(req.body, { tenantId });
+
+        // One Grafana/Alertmanager POST can carry alerts for several entities.
+        // Each is its own signal with its own fingerprint, so each runs the full
+        // path below. Duplicate incidents are prevented by the atomic upsert in
+        // findOrCreateOpenIncident (partial unique index on tenant_id+fingerprint
+        // WHERE status='open'), NOT by this loop — so parallelising is safe for
+        // correctness; sequential just avoids redundant conflict work per batch.
+        // ponytail: sequential fan-out, O(n) round-trips. Batches are small
+        // (single digits); parallelise per-fingerprint if a real sender ships 100.
+        const results = [];
+        for (const one of splitBatch(req.body)) {
+            results.push(await handleOne(one));
+        }
+        if (results.length === 1) {
+            const { _status, ...one } = results[0];
+            return reply.status(_status ?? 202).send(one);
+        }
+        // A batch is 202 even if some members were unresolvable: the rest were
+        // accepted, and one bad alert must not discard the good ones.
+        return reply.status(202).send({
+            status: "batch",
+            results: results.map(({ _status, ...r }) => r),
+        });
+
+        async function handleOne(body) {
+        const signal = triage(body, { tenantId });
+
+        // No entity means no fingerprint, and the old fallback of the literal
+        // string "unknown" was worse than a rejection: every unrecognised
+        // payload in the tenant collapsed onto ONE shared fingerprint, so
+        // unrelated alerts merged into a single incident and only the first
+        // ever got analysed. A misconfigured sender should hear about it.
+        if (!signal.entity) {
+            return {
+                _status: 422,
+                error: "Could not identify the affected entity",
+                hint: "Send a service/host/entity field, a Prometheus-style label, or a service:<name> tag",
+            };
+        }
 
         // Record the decision BEFORE acting on it, so a suppressed signal is
         // just as durable as an escalated one. Without the suppressed rows
@@ -93,11 +150,11 @@ export default async function ingestRoutes(fastify) {
                 score: signal.score, threshold: signal.threshold,
                 escalated: false, features: signal.features, excerpt,
             });
-            return reply.status(202).send({
+            return {
                 status: "suppressed",
                 score: Number(signal.score.toFixed(4)),
                 threshold: Number(signal.threshold.toFixed(4)),
-            });
+            };
         }
 
         // A flap — the same entity re-firing shortly after it auto-resolved — is
@@ -145,10 +202,27 @@ export default async function ingestRoutes(fastify) {
         });
 
         let reportId = null;
+        let shed = false;
         if (created) {
-            const report = await createPendingReport(fastify.db, incidentId);
-            reportId = report.id;
-            await analysisQueue.add("analyze-incident", { incidentId, reportId });
+            // Shed the reasoning pass, never the record. The signals row and the
+            // evidence row above are already written and stay written — they are
+            // the calibration denominator and the outage's evidence trail. What a
+            // saturated queue can't afford is another LLM job.
+            // ponytail: no retry — a shed incident is never analyzed. Add a
+            // backlog sweep if sheds turn out to be more than rare.
+            const depth = SHED_DEPTH > 0 && signal.score < URGENT_SCORE
+                ? await analysisQueue.getWaitingCount()
+                : null;
+            let priority;
+            ({ shed, priority } = analysisDecision({ score: signal.score, depth }));
+
+            if (shed) {
+                req.log.warn({ slug, incidentId, score: signal.score, depth }, "[Ingest] shed analysis — queue saturated");
+            } else {
+                const report = await createPendingReport(fastify.db, incidentId);
+                reportId = report.id;
+                await analysisQueue.add("analyze-incident", { incidentId, reportId }, { priority });
+            }
         } else {
             // Existing incident gained a signal — push it to anyone watching,
             // but do NOT pay for another reasoning pass.
@@ -160,14 +234,16 @@ export default async function ingestRoutes(fastify) {
             });
         }
 
-        return reply.status(202).send({
-            status: created ? "incident-opened" : reopened ? "reopened" : "attached",
+        return {
+            status: created ? (shed ? "incident-opened-analysis-shed" : "incident-opened")
+                : reopened ? "reopened" : "attached",
             incidentId,
             signalCount,
             reportId,
             score: Number(signal.score.toFixed(4)),
             threshold: Number(signal.threshold.toFixed(4)),
-        });
+        };
+        }
     });
 
     // Operator-facing: shows the tenant its ingest URL and key. Behind normal
@@ -189,9 +265,31 @@ export default async function ingestRoutes(fastify) {
             keyVersion: org.ingestKeyVersion,
             usage: {
                 signed: "Grafana 12+: HMAC-SHA256 over `<timestamp>:<body>`, sent as x-grafana-alerting-signature with x-grafana-alerting-timestamp",
-                static: "Datadog and others: send the key as x-forge-ingest-key or Authorization: Bearer <key>",
+                static: "Everyone else: send the key as x-forge-ingest-key or Authorization: Bearer <key>",
+                senders: "Payloads are normalized from Grafana, Prometheus/Alertmanager, Datadog, Sentry, PagerDuty, Opsgenie, New Relic, CloudWatch (via SNS), Splunk and Honeycomb. Anything else works too if it carries a service/host/entity field, a Prometheus-style label, or a service:<name> tag.",
             },
         };
+    });
+
+    // The connect catalog: everything a UI needs to render one button per
+    // sender. Same permission as /credentials because it embeds the live key.
+    fastify.get("/ingest/setup", {
+        preHandler: fastify.requirePermission(PERMISSIONS.ORG_MANAGE),
+    }, async (req, reply) => {
+        const tenantId = req.user.organizationId;
+        const [org] = await fastify.db
+            .select().from(organizations).where(eq(organizations.id, tenantId)).limit(1);
+        if (!org?.ingestSlug) {
+            return reply.status(409).send({ error: "Ingest is not provisioned for this organization" });
+        }
+
+        const url = `${process.env.APP_URL ?? ""}/ingest/${org.ingestSlug}`;
+        const key = deriveIngestKey(org.id, org.ingestKeyVersion);
+        const only = req.query?.sender;
+        const list = only ? SENDERS.filter((s) => s.id === only) : SENDERS;
+        if (only && !list.length) return reply.status(404).send({ error: "Unknown sender" });
+
+        return { success: true, senders: list.map((s) => buildSetup(s, { url, key })) };
     });
 
     // Revocation. The whole justification for deriving keys instead of storing

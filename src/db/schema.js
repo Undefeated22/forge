@@ -279,6 +279,16 @@ export const reports = pgTable("reports", {
     // What the council agreed on, and how far apart it started. Kept separate
     // from `hypotheses` so the disagreement stays measurable — see 0015.
     consensus: jsonb("consensus"),
+    // MCTS trace: which telemetry segments the search chose and what each was
+    // worth. NULL unless the deep path ran. See modules/analysis/investigator.js
+    investigation: jsonb("investigation"),
+    // Human-readable cause when status = 'failed'. A failure that cannot
+    // explain itself is barely better than a hang. See 0017.
+    failureReason: text("failure_reason"),
+    // Who has checked off which runbook step during live incident handling.
+    // { "<stepId>": { done, by, at } }, keyed by scored-step id. Not fenced —
+    // human collaboration state, not analysis output. See 0018.
+    runbookCheckoffs: jsonb("runbook_checkoffs"),
     // Monotonic fencing token of the last holder to write this row. A write
     // carrying a lower token is refused — that is what makes an expired-but-
     // unaware lease holder harmless. See lib/fencedLock.js.

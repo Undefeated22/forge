@@ -91,6 +91,67 @@ export async function getBestGraphContext(db, fusedText, tenantId = "default") {
     return best;
 }
 
+/**
+ * Pure multi-source BFS neighbourhood over an in-memory causal graph.
+ *
+ * The traversal is UNDIRECTED — an incident on a component that *caused* this
+ * one is as structurally relevant as one it caused — but the direction of the
+ * first edge crossed is kept so the prompt can say "upstream of" vs "downstream
+ * of". First arrival wins, recording the seed it came from and the hop count.
+ *
+ * @returns {Map<string,{hops:number,origin:string,relation:'upstream'|'downstream'}>}
+ *          normalized component name → how it was reached, excluding the seeds.
+ */
+export function expandNeighborhood(nodes, edges, seedComponents, maxHops = 2) {
+    const norm = (s) => String(s ?? "").toLowerCase().trim();
+    const nameById = new Map(nodes.map((n) => [n.id, norm(n.componentName)]));
+    const idByName = new Map(nodes.map((n) => [norm(n.componentName), n.id]));
+
+    // Undirected adjacency that remembers each edge's original orientation.
+    const adj = new Map();
+    const link = (from, to, relation) => {
+        if (!adj.has(from)) adj.set(from, []);
+        adj.get(from).push({ to, relation });
+    };
+    for (const e of edges) {
+        link(e.fromNodeId, e.toNodeId, "downstream"); // from → to: from caused to
+        link(e.toNodeId, e.fromNodeId, "upstream");   // reverse: to was caused by from
+    }
+
+    const seeds = new Set(seedComponents.map(norm).filter((n) => idByName.has(n)));
+    const out = new Map();
+    let frontier = [...seeds].map((name) => ({ id: idByName.get(name), origin: name, relation: null }));
+    const visited = new Set(frontier.map((f) => f.id));
+
+    for (let depth = 0; depth < maxHops && frontier.length; depth++) {
+        const next = [];
+        for (const cur of frontier) {
+            for (const edge of adj.get(cur.id) ?? []) {
+                if (visited.has(edge.to)) continue;
+                visited.add(edge.to);
+                // The relation is that of the FIRST edge from the seed, so a
+                // 2-hop node still reads as "downstream of <seed>".
+                const relation = depth === 0 ? edge.relation : cur.relation;
+                const name = nameById.get(edge.to);
+                if (name && !seeds.has(name)) out.set(name, { hops: depth + 1, origin: cur.origin, relation });
+                next.push({ id: edge.to, origin: cur.origin, relation });
+            }
+        }
+        frontier = next;
+    }
+    return out;
+}
+
+/** Load the tenant's graph once, then expand the neighbourhood of the seeds. */
+export async function getComponentNeighborhood(db, seedComponents, tenantId = "default", maxHops = 2) {
+    if (!seedComponents?.length) return new Map();
+    const [nodes, edges] = await Promise.all([
+        db.select().from(causalGraphNodes).where(eq(causalGraphNodes.tenantId, tenantId)),
+        db.select().from(causalGraphEdges).where(eq(causalGraphEdges.tenantId, tenantId)),
+    ]);
+    return expandNeighborhood(nodes, edges, seedComponents, maxHops);
+}
+
 export function formatGraphContextForPrompt(graphContext) {
     if (!graphContext) return "";
 

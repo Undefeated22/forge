@@ -185,35 +185,44 @@ structured JSON (`rootCauseAnalysis`, `incidentFingerprint`, `timeline`). What i
 missing is that it is a *soloist, not a council member* — nothing else produces a
 competing hypothesis for it to be weighed against.
 
-### MCTS / UCT investigation — Deferred
+### MCTS / UCT investigation — BUILT
 
-Treat investigation as an MDP: state = services visited + evidence gathered,
-action = inspect/pull/expand, reward = information gain
-`r(s,a) = H(R|e_s) − H(R|e_s ∪ {outcome(a)})`, explored with
-`UCT = Q + c·√(ln N(s) / N(s,a))` under progressive widening.
+`lib/mcts.js` (generic UCT) + `modules/analysis/investigator.js` (the domain).
+State = belief over the shared hypothesis set + which segments have been read,
+action = read a telemetry segment, reward =
+`H(R|e_s) − H(R|e_s ∪ {outcome(a)})` measured as normalized-entropy collapse.
 
-**Why not:** the reward is the blocker, not the search. Computing information
-gain over the root-cause variable `R` requires a probability distribution over
-root causes that updates as evidence arrives. Forge does not have one — the LLM
-returns a single narrative hypothesis, not a posterior. MCTS without a reward
-function is a random walk that spends real money on tool calls.
+The unblocking change was the shared hypothesis set below: once agents emit
+distributions, the reward became computable, exactly as predicted.
 
-**Build when:** agents emit distributions over a shared hypothesis set (see
-below). That same change is what makes both MCTS *and* consensus possible, which
-is why it is the highest-leverage unbuilt item in the system.
+**What shipped narrower than the sketch:** the action space is retrieval over
+evidence Forge already holds, not `inspect/pull/expand` against live
+infrastructure — Forge has no production access. No progressive widening; the
+action set is small and finite (≤12 segments) so it does not need it.
 
-### Shared discrete hypothesis set — Deferred (the keystone)
+**It is gated on truncated evidence.** When the fused telemetry fits in one
+context window the search never runs, because one prompt beats any search over
+text that prompt could already see. Its real justification is the deep path:
+`deepAnalyze` maps over up to 12 × 120k-char chunks blindly, ~3.6x the entire
+Groq free-tier daily token budget. Choosing 4 segments by information gain is
+what makes that path affordable at all.
+
+### Shared discrete hypothesis set — **Built** (the keystone)
 
 Constrain every agent to emit `p_i ∈ Δ^(m−1)` over a shared hypothesis set
 `H = {h_1 … h_m}`.
 
-**Why it matters:** this single change unblocks *three* separate roadmap items —
+**Why it mattered:** this single change unblocked *three* separate roadmap items —
 MCTS reward, opinion pooling, and calibrated confidence. Free-text hypotheses
 cannot be averaged, searched over, or scored. Distributions can.
 
-**Why not yet:** requires deciding where `H` comes from. Candidates: the causal
-graph's known components, the runbook corpus, or a per-incident candidate set
-generated in a first LLM pass. That design decision is unresolved.
+**Where `H` comes from — resolved:** the per-incident candidate set generated in
+a first LLM pass. `vanguard.js` (`generateHypotheses`) produces `H` and the
+Vanguard's own belief over it; `council.js` (`convene`) has every voter emit a
+distribution over that same `H`; `consensus.js` (`poolBeliefs`) pools them.
+Wired end to end in `analysis.worker.js`. The other candidates (causal-graph
+components, runbook corpus) were not needed — a per-incident set is sharper than
+a fixed vocabulary.
 
 ---
 
@@ -293,16 +302,28 @@ equivalent.
 **Build when:** Forge gains an execution path. At that point the gate is
 mandatory, not optional.
 
-### Structured retrieval over prior incidents — Partial
+### Structured retrieval over prior incidents — **Built**
 
-Retrieve top-k resolved incidents by embedding similarity as few-shot evidence.
+Retrieve resolved incidents as few-shot evidence — not by embedding similarity
+alone (flat-chunk RAG underperforms on RCA), but graph-structured, which the
+literature shows beats it.
 
-**Why:** this exists (`incidentMemory.js`, pgvector, verified recalling a prior
-incident). The roadmap note stands though: the literature is clear that naive
-flat-chunk RAG underperforms on RCA and that SOP-/graph-structured retrieval
-beats it. Forge already has a causal graph, so the graph-structured version is
-reachable — `hybridContext.js` fuses graph and vector retrieval today, which is
-partway there.
+`hybridContext.js` now genuinely fuses the two signals Forge already had
+(`incidentMemory.js` pgvector recall + `graphReader.js` causal graph). Vector
+recall seeds a set of components; `expandNeighborhood` walks the causal edges
+(undirected, direction kept for the label); `findIncidentsByComponent` pulls
+past incidents on those causally-linked components even when their TEXT never
+matched. Each result is tagged with its basis — `vector`, `graph`, or `both` —
+so the RCA prompt can weigh a topological match differently from a textual one.
+
+> An earlier revision of this entry claimed `hybridContext.js` "fuses graph and
+> vector retrieval today". It did not exist; only the vector half did. It exists
+> now and the claim is finally true.
+
+Verified live on real Gemini embeddings: a redis incident worded nothing like
+the query (0.62 cosine, below the 0.70 recall floor) was invisible to flat
+vector recall, and surfaced by structured recall as "1 hop downstream of
+payment-gateway" — the repeat that different wording had hidden.
 
 ---
 

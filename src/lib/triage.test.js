@@ -111,8 +111,93 @@ describe("normalizeSignal", () => {
     });
 
     it("does not throw on an empty or junk body", () => {
-        expect(normalizeSignal({}).entity).toBe("unknown");
-        expect(normalizeSignal(undefined).entity).toBe("unknown");
+        expect(normalizeSignal({}).entity).toBe(null);
+        expect(normalizeSignal(undefined).entity).toBe(null);
+        expect(normalizeSignal({ hello: "world" }).entity).toBe(null);
+    });
+
+    // A null entity is deliberate: the old "unknown" fallback gave every
+    // unrecognised payload in a tenant the SAME fingerprint, silently merging
+    // unrelated alerts into one incident. The route now rejects with 422.
+    it("never invents an entity, so unrelated junk cannot share a fingerprint", () => {
+        expect(normalizeSignal({ severity: "critical", message: "something broke" }).entity)
+            .toBe(null);
+    });
+});
+
+describe("normalizeSignal — vendor coverage", () => {
+    // Real payload shapes, trimmed. Each asserts the entity, because the entity
+    // is what becomes the fingerprint and therefore what decides whether two
+    // alerts are one incident.
+    const cases = [
+        ["prometheus/alertmanager", {
+            status: "firing", labels: { job: "api", severity: "warning", alertname: "TargetDown" },
+            annotations: { description: "scrape failed" },
+        }, { entity: "api", severity: "warning", state: "firing" }],
+
+        ["sentry", {
+            action: "triggered",
+            data: { issue: { title: "TypeError", level: "error", project: { slug: "web" }, culprit: "app/main" } },
+        }, { source: "sentry", entity: "web", severity: "error" }],
+
+        ["pagerduty v3", {
+            event: { data: { service: { summary: "payments" }, urgency: "high", title: "DB down" } },
+        }, { source: "pagerduty", entity: "payments", severity: "high" }],
+
+        ["cloudwatch via sns", {
+            Type: "Notification",
+            Message: JSON.stringify({
+                AlarmName: "CPU-High", NewStateValue: "ALARM", NewStateReason: "3 datapoints",
+                Trigger: { Dimensions: [{ name: "InstanceId", value: "i-abc123" }] },
+            }),
+        }, { source: "cloudwatch", entity: "i-abc123", severity: "critical", state: "firing" }],
+
+        ["new relic", {
+            condition_name: "Apdex low", severity: "CRITICAL", targets: [{ name: "api-gateway" }],
+        }, { source: "newrelic", entity: "api-gateway" }],
+
+        ["opsgenie", {
+            alert: { alertId: "x1", message: "Disk full", entity: "db-primary", priority: "P1" },
+        }, { source: "opsgenie", entity: "db-primary", severity: "P1" }],
+
+        ["splunk", {
+            search_name: "Failed logins", result: { host: "auth-01" },
+        }, { source: "splunk", entity: "auth-01" }],
+
+        ["honeycomb", {
+            name: "latency", dataset: "frontend", trigger: { name: "p99" },
+        }, { entity: "frontend" }],
+    ];
+
+    for (const [name, payload, expected] of cases) {
+        it(`reads ${name}`, () => {
+            expect(normalizeSignal(payload)).toMatchObject(expected);
+        });
+    }
+
+    it("reads a CloudWatch all-clear as resolved", () => {
+        const s = normalizeSignal({ Message: JSON.stringify({ AlarmName: "CPU-High", NewStateValue: "OK" }) });
+        expect(s.state).toBe("resolved");
+    });
+
+    it("prefers the CloudWatch dimension value over the alarm name", () => {
+        // The dimension is {name: "InstanceId", value: "i-abc"} — picking .name
+        // would fingerprint every alarm in the account as "InstanceId".
+        const s = normalizeSignal({
+            Message: JSON.stringify({
+                AlarmName: "CPU-High",
+                Trigger: { Dimensions: [{ name: "InstanceId", value: "i-abc123" }] },
+            }),
+        });
+        expect(s.entity).toBe("i-abc123");
+    });
+
+    it("still fingerprints one entity across vendors", () => {
+        // The whole point of entity-only fingerprinting: Sentry and PagerDuty
+        // reporting the same service must produce ONE incident.
+        const a = normalizeSignal({ data: { issue: { project: { slug: "checkout" } } } });
+        const b = normalizeSignal({ event: { data: { service: { summary: "checkout" } } } });
+        expect(a.entity).toBe(b.entity);
     });
 });
 

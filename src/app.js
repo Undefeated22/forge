@@ -6,6 +6,7 @@ import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
 import dbPlugin from "./plugins/db.js";
 import { healthRoute } from "./routes/health.js";
+import { factsRoute } from "./routes/facts.js";
 import incidentRoutes from "./modules/incidents/incident.routes.js";
 import analysisRoutes from "./modules/analysis/analysis.routes.js";
 import reportRoutes from "./modules/reports/report.routes.js";
@@ -37,7 +38,12 @@ export function buildApp() {
 
     app.register(cors, {
         origin: allowedOrigins,
-        credentials: true
+        credentials: true,
+        // @fastify/cors v11 narrowed its default to "GET,HEAD,POST", which
+        // rejects the browser preflight for every PATCH/PUT/DELETE — silently
+        // breaking runbook check-off, role changes, and doc deletion. State the
+        // methods we actually serve.
+        methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     });
 
     // ---- helmet + rate-limit MUST register before any route plugin: Fastify
@@ -79,8 +85,25 @@ export function buildApp() {
     // ---- authenticate + authorize decorators (DB-backed, RBAC) ----
     app.register(authPlugin);
 
+    // Swagger MUST register before the route plugins. Fastify only shows a
+    // plugin the routes added AFTER it, so registering these at the bottom (as
+    // they were) produced a /docs page documenting exactly zero paths.
+    app.register(swagger, {
+        openapi: {
+            info: {
+                title: "Forge API",
+                description: "Incident investigation backend",
+                version: "0.0.0"
+            }
+        }
+    });
+    app.register(swaggerUI, {
+        routePrefix: "/docs"
+    });
+
     app.register(encryptedEvidenceRoutes, { prefix: "/incidents" });
     app.register(healthRoute);
+    app.register(factsRoute);
     app.register(authRoutes, { prefix: "/auth" });
     app.register(oauthRoutes);
     app.register(orgRoutes, { prefix: "/org" });
@@ -94,19 +117,6 @@ export function buildApp() {
     app.register(ragRoutes);
     app.register(ingestRoutes);
     app.register(signalRoutes);
-
-    app.register(swagger, {
-        openapi: {
-            info: {
-                title: "Forge API",
-                description: "Incident investigation backend",
-                version: "0.0.0"
-            }
-        }
-    });
-    app.register(swaggerUI, {
-        routePrefix: "/docs"
-    });
 
     return app;
 }
