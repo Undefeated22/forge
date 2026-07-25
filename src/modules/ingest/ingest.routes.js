@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { organizations, evidence, signals } from "../../db/schema.js";
 import { analysisQueue } from "../../queues/analysis.queue.js";
 import { createPendingReport } from "../reports/reports.repository.js";
-import { triage } from "../../lib/triage.js";
+import { triage, splitBatch } from "../../lib/triage.js";
 import { deriveIngestKey, verifyIngestRequest } from "../../lib/ingestAuth.js";
 import { createRedactor } from "../../lib/redaction.js";
 import { redactionEnabled } from "../../lib/redactionCrypto.js";
@@ -97,7 +97,32 @@ export default async function ingestRoutes(fastify) {
         }
 
         const tenantId = org.id;
-        const signal = triage(req.body, { tenantId });
+
+        // One Grafana/Alertmanager POST can carry alerts for several entities.
+        // Each is its own signal with its own fingerprint, so each runs the full
+        // path below. Duplicate incidents are prevented by the atomic upsert in
+        // findOrCreateOpenIncident (partial unique index on tenant_id+fingerprint
+        // WHERE status='open'), NOT by this loop — so parallelising is safe for
+        // correctness; sequential just avoids redundant conflict work per batch.
+        // ponytail: sequential fan-out, O(n) round-trips. Batches are small
+        // (single digits); parallelise per-fingerprint if a real sender ships 100.
+        const results = [];
+        for (const one of splitBatch(req.body)) {
+            results.push(await handleOne(one));
+        }
+        if (results.length === 1) {
+            const { _status, ...one } = results[0];
+            return reply.status(_status ?? 202).send(one);
+        }
+        // A batch is 202 even if some members were unresolvable: the rest were
+        // accepted, and one bad alert must not discard the good ones.
+        return reply.status(202).send({
+            status: "batch",
+            results: results.map(({ _status, ...r }) => r),
+        });
+
+        async function handleOne(body) {
+        const signal = triage(body, { tenantId });
 
         // No entity means no fingerprint, and the old fallback of the literal
         // string "unknown" was worse than a rejection: every unrecognised
@@ -105,10 +130,11 @@ export default async function ingestRoutes(fastify) {
         // unrelated alerts merged into a single incident and only the first
         // ever got analysed. A misconfigured sender should hear about it.
         if (!signal.entity) {
-            return reply.status(422).send({
+            return {
+                _status: 422,
                 error: "Could not identify the affected entity",
                 hint: "Send a service/host/entity field, a Prometheus-style label, or a service:<name> tag",
-            });
+            };
         }
 
         // Record the decision BEFORE acting on it, so a suppressed signal is
@@ -124,11 +150,11 @@ export default async function ingestRoutes(fastify) {
                 score: signal.score, threshold: signal.threshold,
                 escalated: false, features: signal.features, excerpt,
             });
-            return reply.status(202).send({
+            return {
                 status: "suppressed",
                 score: Number(signal.score.toFixed(4)),
                 threshold: Number(signal.threshold.toFixed(4)),
-            });
+            };
         }
 
         // A flap — the same entity re-firing shortly after it auto-resolved — is
@@ -208,7 +234,7 @@ export default async function ingestRoutes(fastify) {
             });
         }
 
-        return reply.status(202).send({
+        return {
             status: created ? (shed ? "incident-opened-analysis-shed" : "incident-opened")
                 : reopened ? "reopened" : "attached",
             incidentId,
@@ -216,7 +242,8 @@ export default async function ingestRoutes(fastify) {
             reportId,
             score: Number(signal.score.toFixed(4)),
             threshold: Number(signal.threshold.toFixed(4)),
-        });
+        };
+        }
     });
 
     // Operator-facing: shows the tenant its ingest URL and key. Behind normal

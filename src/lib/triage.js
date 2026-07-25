@@ -185,6 +185,16 @@ function envelopes(body) {
     return out.length ? out : [{}];
 }
 
+// Grafana / Alertmanager POST a batch: {alerts:[...]}. `envelopes` only ever
+// looked at alerts[0], so every other alert in the batch was silently dropped —
+// and a batch routinely spans DIFFERENT entities. Split one batch body into one
+// body per alert; every other sender passes through as a single-element array.
+export function splitBatch(body) {
+    const alerts = body?.alerts;
+    if (!Array.isArray(alerts) || alerts.length <= 1) return [body];
+    return alerts.map((a) => ({ ...body, alerts: [a] }));
+}
+
 // An entity arrives as a bare string from most senders and as an object from
 // PagerDuty ({summary}), Sentry ({slug}), and New Relic ({name}).
 function named(v) {
